@@ -707,9 +707,6 @@ def extract_questions_from_page(
             ],
             temperature=0,
             max_tokens=2500,
-            response_format={
-                "type": "json_object"
-            },
         )
 
         raw = (
