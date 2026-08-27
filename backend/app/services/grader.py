@@ -324,13 +324,11 @@ Return JSON only.
 
                     temperature=0,
 
-                    max_completion_tokens=500,
+                    max_tokens=500,
 
                     response_format={
                         "type": "json_object"
                     },
-
-                    reasoning_effort="none",
                 )
             )
 

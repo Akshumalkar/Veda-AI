@@ -599,11 +599,7 @@ def extract_questions_from_page(
                         }
                     ],
                     temperature=0,
-                    max_completion_tokens=4096,
-                    reasoning_effort="none",
-                    response_format={
-                        "type": "json_object"
-                    },
+                    max_tokens=4096,
                 )
             )
 
