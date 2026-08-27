@@ -1,24 +1,29 @@
-﻿import base64
+import base64
 import json
 import re
 from time import sleep
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-from google.genai import types
-
-from app.services.gemini_client import client
+from app.services.groq_client import client, MODEL_NAME
 from app.utils.pdf import pdf_to_images
 
 
 ANSWER_PROMPT = """
-You are an expert exam-sheet vision AI.
+You are an expert examination answer-sheet vision AI.
 
-Your task is to analyze a student's handwritten answer sheet and extract
-EVERY answer that the student actually wrote.
+Analyze ONLY the student's handwritten answer sheet.
+
+Your task is to extract EVERY answer that the student actually wrote.
 
 IMPORTANT:
-The question paper is NOT available here. You only have the student's
-answer sheet. Therefore, NEVER invent a question number or answer.
+- The question paper is NOT available.
+- Do NOT invent questions.
+- Do NOT invent question numbers.
+- Do NOT assume answers are sequential.
+- Answers may be written out of order.
+- An answer can continue onto another page.
+- A student may leave questions unanswered.
+- Extract only content actually visible in the student's answer sheet.
 
 ==================================================
 QUESTION NUMBER DETECTION
@@ -26,7 +31,7 @@ QUESTION NUMBER DETECTION
 
 Detect question numbers written by the student.
 
-Examples of valid forms:
+Valid examples:
 
 Q1
 Q.1
@@ -35,6 +40,7 @@ Q 1
 1.
 Ans 1
 Answer 1
+
 Q1(a)
 Q1 (a)
 1(a)
@@ -42,32 +48,33 @@ Q1 (a)
 1-a
 1.a
 1[a]
+
 Q5(b)
 5(b)
 5b
-11(ii)
+
 11(ii)
 11.2
 
-Normalize question numbers to this format:
+Normalize them:
 
-1       -> "1"
-Q1      -> "1"
-1.      -> "1"
+Q1 -> "1"
+Q.1 -> "1"
+1. -> "1"
 
-1(a)    -> "1(a)"
-1 (a)   -> "1(a)"
-1.a     -> "1(a)"
-1-a     -> "1(a)"
-1[a]    -> "1(a)"
-1b      -> "1(b)"
+1(a) -> "1(a)"
+1 (a) -> "1(a)"
+1.a -> "1(a)"
+1-a -> "1(a)"
+1[a] -> "1(a)"
+1b -> "1(b)"
 
-Roman numerals must be converted:
+Roman numerals:
 
-1(i)    -> "1(a)"
-1(ii)   -> "1(b)"
-1(iii)  -> "1(c)"
-1(iv)   -> "1(d)"
+1(i) -> "1(a)"
+1(ii) -> "1(b)"
+1(iii) -> "1(c)"
+1(iv) -> "1(d)"
 
 Numeric subparts:
 
@@ -75,12 +82,11 @@ Numeric subparts:
 1.2 -> "1(b)"
 1.3 -> "1(c)"
 
-DO NOT guess a number from the position of an answer.
-
-If the student clearly starts an answer but there is no visible question
-number, use:
+If there is clearly an answer but NO visible question number:
 
 "question_number": null
+
+NEVER guess the question number.
 
 ==================================================
 ANSWER SEGMENTATION
@@ -88,96 +94,129 @@ ANSWER SEGMENTATION
 
 Create ONE answer object for each distinct answer.
 
-An answer normally starts when:
+A new answer normally begins when:
 
-- A new question number is written.
-- A new sub-question is written.
-- The student clearly starts answering another question.
+- a new question number appears
+- a new sub-question appears
+- the student clearly begins answering another question
 
-Everything written after that question number belongs to that answer until
-the next clearly identifiable question number.
+Everything after that belongs to the same answer until the next clearly identifiable question number.
 
-Do NOT split one answer into multiple answers simply because:
+DO NOT split an answer because of:
 
-- there are multiple paragraphs
-- the answer continues on another page
-- there is a diagram
-- there is a table
-- there is a large blank space
+- paragraphs
+- blank spaces
+- formulas
+- diagrams
+- tables
+- headings
+- page breaks
 
-If the same answer continues onto another page, keep it as ONE answer object
-and add another region to its "regions" array.
+If the answer continues on another page, keep it as ONE answer
+and add another region to the regions array.
 
 ==================================================
 ANSWER TEXT
 ==================================================
 
-Transcribe the student's answer as accurately as possible.
+Transcribe what the student actually wrote.
 
 Preserve:
 
-- important technical terms
+- technical terms
 - equations
-- numbers
-- bullet points
-- headings
-- definitions
+- chemical equations
 - formulas
-- meaningful diagram labels
+- numerical calculations
+- units
+- definitions
+- headings
+- bullet points
+- diagram labels
+- mathematical symbols
 
-Do not rewrite the student's answer into better English.
+Do NOT improve the student's English.
 
-Do not correct spelling unless the handwritten word is completely
-unreadable.
+Do NOT rewrite the student's answer.
 
-If part of the handwriting is unreadable, use the best visual transcription
-possible without inventing content.
+Do NOT correct spelling unless completely unreadable.
 
-Do NOT include the question text unless the student actually wrote it.
+Do NOT include question text unless the student actually wrote it.
 
 ==================================================
-BBOX / HIGHLIGHTING
+DIAGRAMS
 ==================================================
 
-For every answer, identify ALL physical regions belonging to that answer.
+If the student drew a diagram:
+
+- keep the diagram as part of the answer
+- include the diagram inside the answer region
+- preserve meaningful labels
+- do NOT invent labels
+- do NOT describe a diagram that does not exist
+
+==================================================
+FORMULAS AND CALCULATIONS
+==================================================
+
+Extract formulas and numerical calculations exactly as visible.
+
+Examples:
+
+PV = nRT
+
+F = ma
+
+E = mc²
+
+M = mass / volume
+
+Do not change mathematical meaning.
+
+==================================================
+BBOX
+==================================================
+
+For EVERY answer identify ALL physical regions belonging to that answer.
 
 Coordinates MUST be normalized from 0 to 1000.
 
-The coordinate system is:
+Coordinate system:
 
-x = horizontal position from LEFT to RIGHT
-y = vertical position from TOP to BOTTOM
+x = left to right
+y = top to bottom
 
-bbox:
+Format:
 
 {
-  "x": integer,
-  "y": integer,
-  "width": integer,
-  "height": integer
+    "x": integer,
+    "y": integer,
+    "width": integer,
+    "height": integer
 }
 
-The bbox must cover the actual handwritten answer content.
+The bbox must cover the actual handwritten content.
 
 Do NOT return the entire page as the bbox.
 
-Do NOT include unrelated answers.
+Include:
 
-Include diagrams, tables, formulas, and answer text when they belong to
-that answer.
+- answer text
+- formulas
+- calculations
+- diagrams
+- tables
+- labels
 
-If an answer continues onto another page, create another region:
+when they belong to that answer.
 
-{
-  "page": 2,
-  "bbox": {...}
-}
+If the answer continues onto another page, create another region.
 
 ==================================================
-PAGE NUMBERS
+PAGE NUMBER
 ==================================================
 
-Use the actual image/page number supplied with each page.
+Use the actual page number supplied with the image.
 
 Page numbers start at 1.
 
@@ -185,33 +224,31 @@ Page numbers start at 1.
 ANSWER ID
 ==================================================
 
-Generate sequential IDs:
+Create sequential IDs:
 
 a1
 a2
 a3
 a4
-...
-
-The IDs must be unique.
 
 ==================================================
-IMPORTANT ACCURACY RULES
+ACCURACY RULES
 ==================================================
 
 1. Extract EVERY visible answer.
-2. Preserve the student's actual order on the answer sheet.
-3. Answers may be OUT OF ORDER.
-4. Do NOT assume answers are sequential.
-5. Do NOT create answers that do not exist.
-6. Do NOT merge different numbered questions.
-7. Do NOT split one numbered answer unnecessarily.
-8. If no question number is visible, use null.
-9. Use normalized question numbers.
-10. Bounding boxes must be normalized 0-1000.
-11. Return valid JSON only.
-12. Do not include markdown.
-13. Do not include explanations outside JSON.
+2. Preserve student's answer-sheet order.
+3. Answers can be out of order.
+4. Never assume sequential numbering.
+5. Never invent answers.
+6. Never invent question numbers.
+7. Do not merge separate numbered answers.
+8. Do not unnecessarily split one answer.
+9. Use null if question number is not visible.
+10. Bounding boxes must use 0-1000 coordinates.
+11. Include diagrams and formulas.
+12. Return valid JSON only.
+13. Do not return markdown.
+14. Do not return explanations.
 
 ==================================================
 OUTPUT FORMAT
@@ -220,42 +257,44 @@ OUTPUT FORMAT
 Return exactly:
 
 {
-  "answers": [
-    {
-      "answer_id": "a1",
-      "question_number": "1",
-      "text": "Student's answer text",
-      "regions": [
+    "answers": [
         {
-          "page": 1,
-          "bbox": {
-            "x": 80,
-            "y": 150,
-            "width": 840,
-            "height": 320
-          }
+            "answer_id": "a1",
+            "question_number": "1",
+            "text": "Student's answer text",
+            "regions": [
+                {
+                    "page": 1,
+                    "bbox": {
+                        "x": 80,
+                        "y": 150,
+                        "width": 840,
+                        "height": 320
+                    }
+                }
+            ]
         }
-      ]
-    }
-  ]
+    ]
 }
 
-If there are no detectable answers:
+If no answers are detected:
 
 {
-  "answers": []
+    "answers": []
 }
 """
 
 
 def clean_json_text(text: str) -> str:
-    """
-    Remove markdown code fences if Gemini returns them.
-    """
+    """Clean JSON returned by Groq."""
+
     if not text:
         return ""
 
     text = text.strip()
+
+    # Remove reasoning/think tags if returned by Groq models.
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
 
     match = re.search(
         r"```(?:json)?\s*([\s\S]*?)\s*```",
@@ -264,44 +303,61 @@ def clean_json_text(text: str) -> str:
     )
 
     if match:
-        return match.group(1).strip()
+        text = match.group(1).strip()
 
-    return text
+    first = text.find("{")
+    last = text.rfind("}")
+
+    if (
+        first != -1
+        and last != -1
+        and last > first
+    ):
+        text = text[first:last + 1]
+
+    return text.strip()
 
 
-def normalize_answer_number(value: Any):
-    """
-    Normalize question numbers returned by Gemini.
+def image_to_data_url(
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+) -> str:
+    """Convert image bytes into a base64 data URL."""
 
-    Examples:
-        Q1       -> 1
-        Q.1      -> 1
-        1.       -> 1
-        Q1(a)    -> 1(a)
-        1-a      -> 1(a)
-        1.2      -> 1(b)
-        1(ii)    -> 1(b)
-    """
+    encoded = base64.b64encode(
+        image_bytes
+    ).decode("utf-8")
+
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def normalize_answer_number(
+    value: Any,
+):
+    """Normalize handwritten question numbers."""
 
     if value is None:
         return None
 
-    value = str(value).strip().lower()
+    value = str(
+        value
+    ).strip().lower()
 
     if not value:
         return None
 
-    # Remove prefixes.
     value = re.sub(
         r"^(question|ques|que|answer|ans|q)\.?\s*",
         "",
         value,
     )
 
-    # Remove spaces.
-    value = re.sub(r"\s+", "", value)
+    value = re.sub(
+        r"\s+",
+        "",
+        value,
+    )
 
-    # Remove trailing punctuation.
     value = value.rstrip(".")
 
     roman_map = {
@@ -315,36 +371,55 @@ def normalize_answer_number(value: Any):
         "viii": "h",
     }
 
-    # 1(a), 1[a], 1-a, 1.a, 1a, 1(ii)
+    # 1.1 -> 1(a)
+    match = re.match(
+        r"^(\d+)\.(\d+)$",
+        value,
+    )
+
+    if match:
+
+        number = match.group(1)
+
+        sub_number = int(
+            match.group(2)
+        )
+
+        if 1 <= sub_number <= 26:
+
+            sub = chr(
+                ord("a")
+                + sub_number
+                - 1
+            )
+
+            return f"{number}({sub})"
+
+    # 1(a), 1-a, 1.a, 1a, 1(ii)
     match = re.match(
         r"^(\d+)[\(\[\.\-_]?([a-z]+|[ivx]+)[\)\]]?$",
         value,
     )
 
     if match:
+
         number = match.group(1)
         sub = match.group(2)
 
         if sub in roman_map:
             sub = roman_map[sub]
 
-        # Only accept a single alphabetic subpart.
-        if len(sub) == 1 and sub.isalpha():
+        if (
+            len(sub) == 1
+            and sub.isalpha()
+        ):
             return f"{number}({sub})"
 
-    # 1.1, 1.2, 1.3
-    match = re.match(r"^(\d+)\.(\d+)$", value)
-
-    if match:
-        number = match.group(1)
-        sub_number = int(match.group(2))
-
-        if 1 <= sub_number <= 26:
-            sub = chr(ord("a") + sub_number - 1)
-            return f"{number}({sub})"
-
-    # Plain number.
-    match = re.match(r"^(\d+)$", value)
+    # Plain number
+    match = re.match(
+        r"^(\d+)$",
+        value,
+    )
 
     if match:
         return match.group(1)
@@ -352,12 +427,15 @@ def normalize_answer_number(value: Any):
     return value
 
 
-def sanitize_bbox(bbox: Dict[str, Any]) -> Dict[str, int]:
-    """
-    Keep bounding box values inside normalized 0-1000 coordinates.
-    """
+def sanitize_bbox(
+    bbox: Dict[str, Any],
+) -> Dict[str, int]:
+    """Keep bbox values inside 0-1000."""
 
-    if not isinstance(bbox, dict):
+    if not isinstance(
+        bbox,
+        dict,
+    ):
         return {
             "x": 0,
             "y": 0,
@@ -365,22 +443,67 @@ def sanitize_bbox(bbox: Dict[str, Any]) -> Dict[str, int]:
             "height": 1000,
         }
 
-    def safe_int(value, default=0):
+    def safe_int(
+        value: Any,
+        default: int = 0,
+    ) -> int:
+
         try:
-            return int(float(value))
-        except (TypeError, ValueError):
+            return int(
+                float(value)
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
             return default
 
-    x = safe_int(bbox.get("x"))
-    y = safe_int(bbox.get("y"))
-    width = safe_int(bbox.get("width"))
-    height = safe_int(bbox.get("height"))
+    x = safe_int(
+        bbox.get("x"),
+        0,
+    )
 
-    x = max(0, min(1000, x))
-    y = max(0, min(1000, y))
+    y = safe_int(
+        bbox.get("y"),
+        0,
+    )
 
-    width = max(0, min(1000 - x, width))
-    height = max(0, min(1000 - y, height))
+    width = safe_int(
+        bbox.get("width"),
+        0,
+    )
+
+    height = safe_int(
+        bbox.get("height"),
+        0,
+    )
+
+    x = max(
+        0,
+        min(1000, x),
+    )
+
+    y = max(
+        0,
+        min(1000, y),
+    )
+
+    width = max(
+        0,
+        min(
+            1000 - x,
+            width,
+        ),
+    )
+
+    height = max(
+        0,
+        min(
+            1000 - y,
+            height,
+        ),
+    )
 
     return {
         "x": x,
@@ -390,67 +513,117 @@ def sanitize_bbox(bbox: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
-def sanitize_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Validate and normalize Gemini's answer extraction result before
-    sending it to the mapping/highlighting stages.
-    """
+def sanitize_result(
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate and normalize extracted answers."""
 
-    if not isinstance(result, dict):
-        return {"answers": []}
+    if not isinstance(
+        result,
+        dict,
+    ):
+        return {
+            "answers": []
+        }
 
-    raw_answers = result.get("answers", [])
+    raw_answers = result.get(
+        "answers",
+        [],
+    )
 
-    if not isinstance(raw_answers, list):
-        return {"answers": []}
+    if not isinstance(
+        raw_answers,
+        list,
+    ):
+        return {
+            "answers": []
+        }
 
     answers = []
 
-    for index, answer in enumerate(raw_answers, start=1):
+    for index, answer in enumerate(
+        raw_answers,
+        start=1,
+    ):
 
-        if not isinstance(answer, dict):
+        if not isinstance(
+            answer,
+            dict,
+        ):
             continue
 
-        answer_id = answer.get("answer_id")
+        answer_id = answer.get(
+            "answer_id"
+        )
 
         if not answer_id:
             answer_id = f"a{index}"
 
-        question_number = normalize_answer_number(
-            answer.get("question_number")
+        question_number = (
+            normalize_answer_number(
+                answer.get(
+                    "question_number"
+                )
+            )
         )
 
-        text = answer.get("text", "")
+        text = answer.get(
+            "text",
+            "",
+        )
 
         if text is None:
             text = ""
 
-        text = str(text).strip()
+        text = str(
+            text
+        ).strip()
 
-        raw_regions = answer.get("regions", [])
+        raw_regions = answer.get(
+            "regions",
+            [],
+        )
 
-        if not isinstance(raw_regions, list):
+        if not isinstance(
+            raw_regions,
+            list,
+        ):
             raw_regions = []
 
         regions = []
 
         for region in raw_regions:
 
-            if not isinstance(region, dict):
+            if not isinstance(
+                region,
+                dict,
+            ):
                 continue
 
-            page = region.get("page", 1)
+            page = region.get(
+                "page",
+                1,
+            )
 
             try:
-                page = int(page)
-            except (TypeError, ValueError):
+                page = int(
+                    page
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
                 page = 1
 
             if page < 1:
                 page = 1
 
             bbox = sanitize_bbox(
-                region.get("bbox", {})
+                region.get(
+                    "bbox",
+                    {},
+                )
             )
 
             regions.append(
@@ -460,13 +633,34 @@ def sanitize_result(result: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
 
+        # Keep answers even if text is short because
+        # the student may have written only a diagram/formula.
+        if (
+            not text
+            and not regions
+        ):
+            continue
+
         answers.append(
             {
-                "answer_id": str(answer_id),
-                "question_number": question_number,
+                "answer_id": str(
+                    answer_id
+                ),
+                "question_number": (
+                    question_number
+                ),
                 "text": text,
                 "regions": regions,
             }
+        )
+
+    # Rebuild sequential IDs.
+    for index, answer in enumerate(
+        answers,
+        start=1,
+    ):
+        answer["answer_id"] = (
+            f"a{index}"
         )
 
     return {
@@ -474,69 +668,45 @@ def sanitize_result(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def extract_answers(
-    file_bytes: bytes,
-    content_type: str,
+def extract_answers_from_page(
+    image_bytes: bytes,
+    page_number: int,
+    mime_type: str = "image/png",
 ):
     """
-    Extract handwritten answers from an image or PDF using Gemini vision.
+    Extract handwritten answers from ONE page.
+
+    Processing page-by-page gives better page numbers
+    and more reliable bounding boxes.
     """
 
-    contents = [ANSWER_PROMPT]
+    page_prompt = (
+        ANSWER_PROMPT
+        + "\n\n"
+        + f"IMPORTANT PAGE REFERENCE: "
+        f"This is page {page_number} "
+        "of the student's answer sheet.\n"
+        + f"Every region detected on this image "
+        f"MUST use page={page_number}.\n"
+        + "Do not use another page number.\n"
+        + "Coordinates MUST be normalized from 0 to 1000."
+    )
 
-    if content_type == "application/pdf":
-
-        pages = pdf_to_images(file_bytes)
-
-        for page in pages:
-
-            page_number = page["page"]
-
-            image_bytes = base64.b64decode(
-                page["image"]
-            )
-
-            contents.append(
-                f"""
-IMPORTANT PAGE REFERENCE:
-
-This image is page {page_number} of the student's answer sheet.
-
-All bounding boxes detected on this image MUST use:
-page = {page_number}
-
-Coordinates must be normalized from 0 to 1000.
-"""
-            )
-
-            contents.append(
-                types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type="image/png",
+    message_content = [
+        {
+            "type": "text",
+            "text": page_prompt,
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_to_data_url(
+                    image_bytes,
+                    mime_type,
                 )
-            )
-
-    else:
-
-        contents.append(
-            """
-IMPORTANT PAGE REFERENCE:
-
-This is page 1 of the student's answer sheet.
-
-All bounding boxes detected on this image MUST use:
-page = 1
-
-Coordinates must be normalized from 0 to 1000.
-"""
-        )
-
-        contents.append(
-            types.Part.from_bytes(
-                data=file_bytes,
-                mime_type=content_type or "image/jpeg",
-            )
-        )
+            },
+        },
+    ]
 
     last_error = None
 
@@ -545,50 +715,67 @@ Coordinates must be normalized from 0 to 1000.
         try:
 
             print(
-                f"\n========== ANSWER EXTRACTION "
+                "\n========== ANSWER EXTRACTION "
+                f"PAGE {page_number} "
                 f"ATTEMPT {attempt + 1}/3 =========="
             )
 
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
+            response = (
+                client.chat.completions.create(
+                    model=MODEL_NAME,
+
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": message_content,
+                        }
+                    ],
+
                     temperature=0,
-                ),
+
+                    max_completion_tokens=4096,
+
+                    reasoning_effort="none",
+
+                    response_format={
+                        "type": "json_object"
+                    },
+                )
+            )
+
+            raw = (
+                response
+                .choices[0]
+                .message
+                .content
             )
 
             raw = clean_json_text(
-                response.text
+                raw
             )
 
             print(
-                "\n========== GEMINI ANSWER EXTRACTION =========="
+                "\n========== GROQ ANSWER PAGE "
+                f"{page_number} =========="
             )
+
             print(raw)
-            print(
-                "==============================================\n"
-            )
-
-            result = json.loads(raw)
-
-            result = sanitize_result(result)
-
-            print(
-                "========== SANITIZED ANSWERS =========="
-            )
-
-            for answer in result["answers"]:
-
-                print(
-                    f'{answer["answer_id"]} | '
-                    f'Q={answer["question_number"]} | '
-                    f'regions={len(answer["regions"])} | '
-                    f'text={answer["text"][:100]}'
-                )
 
             print(
                 "========================================\n"
+            )
+
+            if not raw:
+                raise ValueError(
+                    "Groq returned an empty response."
+                )
+
+            result = json.loads(
+                raw
+            )
+
+            result = sanitize_result(
+                result
             )
 
             return result
@@ -598,42 +785,202 @@ Coordinates must be normalized from 0 to 1000.
             last_error = error
 
             print(
-                "Gemini returned invalid JSON: "
-                + str(error)
+                "Invalid JSON returned by Groq: "
+                f"{error}"
             )
 
             if attempt < 2:
-                sleep((attempt + 1) * 3)
+
+                sleep(
+                    (attempt + 1) * 3
+                )
 
         except Exception as error:
 
             last_error = error
 
-            error_message = str(error)
+            error_message = str(
+                error
+            )
 
             print(
-                f"Gemini answer extraction attempt "
-                f"{attempt + 1}/3 failed: "
+                "Groq answer extraction "
+                f"page {page_number} "
+                f"attempt {attempt + 1}/3 failed: "
                 f"{error_message}"
             )
 
-            # Do not retry quota/rate-limit errors.
+            # Never retry rate limits.
             if (
                 "429" in error_message
-                or "RESOURCE_EXHAUSTED" in error_message
+                or "rate_limit"
+                in error_message.lower()
+                or "rate limit"
+                in error_message.lower()
             ):
+
                 print(
-                    "Gemini quota/rate limit reached. "
+                    "Groq rate limit reached. "
                     "Stopping retries immediately."
                 )
+
                 raise error
 
             if attempt < 2:
-                sleep((attempt + 1) * 3)
+
+                wait_seconds = (
+                    attempt + 1
+                ) * 3
+
+                print(
+                    "Retrying answer extraction "
+                    f"in {wait_seconds} seconds..."
+                )
+
+                sleep(
+                    wait_seconds
+                )
 
     if last_error:
         raise last_error
 
     raise RuntimeError(
-        "Answer extraction failed without an exception."
+        f"Answer extraction failed "
+        f"for page {page_number}."
     )
+
+
+def extract_answers(
+    file_bytes: bytes,
+    content_type: str,
+):
+    """
+    Extract all handwritten answers.
+
+    PDFs are processed one page at a time.
+    Images are treated as page 1.
+    """
+
+    all_answers: List[
+        Dict[str, Any]
+    ] = []
+
+    # =========================================================
+    # PDF
+    # =========================================================
+
+    if content_type == "application/pdf":
+
+        pages = pdf_to_images(
+            file_bytes
+        )
+
+        if not pages:
+            return {
+                "answers": []
+            }
+
+        print(
+            f"\nStudent answer sheet contains "
+            f"{len(pages)} page(s)."
+        )
+
+        for page in pages:
+
+            page_number = page[
+                "page"
+            ]
+
+            image_bytes = base64.b64decode(
+                page[
+                    "image"
+                ]
+            )
+
+            page_result = (
+                extract_answers_from_page(
+                    image_bytes=image_bytes,
+                    page_number=page_number,
+                    mime_type="image/png",
+                )
+            )
+
+            page_answers = (
+                page_result.get(
+                    "answers",
+                    [],
+                )
+            )
+
+            print(
+                f"Page {page_number}: "
+                f"{len(page_answers)} "
+                "answer(s) detected."
+            )
+
+            all_answers.extend(
+                page_answers
+            )
+
+    # =========================================================
+    # SINGLE IMAGE
+    # =========================================================
+
+    else:
+
+        page_result = (
+            extract_answers_from_page(
+                image_bytes=file_bytes,
+                page_number=1,
+                mime_type=(
+                    content_type
+                    or "image/jpeg"
+                ),
+            )
+        )
+
+        all_answers.extend(
+            page_result.get(
+                "answers",
+                [],
+            )
+        )
+
+    # =========================================================
+    # Final IDs
+    # =========================================================
+
+    for index, answer in enumerate(
+        all_answers,
+        start=1,
+    ):
+
+        answer["answer_id"] = (
+            f"a{index}"
+        )
+
+    print(
+        "\n========== FINAL ANSWER EXTRACTION =========="
+    )
+
+    print(
+        f"Total answers extracted: "
+        f"{len(all_answers)}"
+    )
+
+    for answer in all_answers:
+
+        print(
+            f'{answer["answer_id"]} | '
+            f'Q={answer["question_number"]} | '
+            f'regions={len(answer["regions"])} | '
+            f'text={answer["text"][:100]}'
+        )
+
+    print(
+        "=============================================\n"
+    )
+
+    return {
+        "answers": all_answers
+    }

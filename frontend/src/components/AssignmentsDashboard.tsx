@@ -6,6 +6,7 @@ import type { BatchSummary } from '../types/assessment';
 
 type AssignmentsDashboardProps = {
   batchSummary?: BatchSummary;
+  assessmentHistory?: any[];
   onOpenExamUpload?: () => void;
 };
 

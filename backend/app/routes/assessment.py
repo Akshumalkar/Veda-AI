@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -6,6 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException
+
 
 from app.services.question_extractor import extract_questions
 from app.services.answer_extractor import extract_answers
@@ -214,8 +215,8 @@ async def process_assessment(
                 raise HTTPException(
                     status_code=429,
                     detail=create_error_response(
-                        "gemini_quota_exceeded",
-                        "Gemini API quota has been exceeded while extracting questions. Please try again later.",
+                        "groq_rate_limit_exceeded",
+                        "Groq API rate limit has been exceeded while extracting questions. Please try again later.",
                     ),
                 )
 
@@ -269,8 +270,8 @@ async def process_assessment(
                 raise HTTPException(
                     status_code=429,
                     detail=create_error_response(
-                        "gemini_quota_exceeded",
-                        "Gemini API quota has been exceeded while extracting answers. Please try again later.",
+                        "groq_rate_limit_exceeded",
+                        "Groq API rate limit has been exceeded while extracting answers. Please try again later.",
                     ),
                 )
 
@@ -336,8 +337,8 @@ async def process_assessment(
                 raise HTTPException(
                     status_code=429,
                     detail=create_error_response(
-                        "gemini_quota_exceeded",
-                        "Gemini API quota has been exceeded while grading the assessment. Please try again later.",
+                        "groq_rate_limit_exceeded",
+                        "Groq API rate limit has been exceeded while grading the assessment. Please try again later.",
                     ),
                 )
 

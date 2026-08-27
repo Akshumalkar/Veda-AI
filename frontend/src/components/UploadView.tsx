@@ -18,6 +18,7 @@ type UploadViewProps = {
   questionFile: File | null;
   answerFiles: File[];
   studentNames: string[];
+  selectedStudent?: any;
   setQuestionFile: (f: File | null) => void;
   setAnswerFiles: (files: File[]) => void;
   setStudentNames: (names: string[]) => void;

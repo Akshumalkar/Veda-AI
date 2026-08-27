@@ -1,9 +1,16 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+
 import './App.css';
 
+import type { Student } from './data/studentStore';
 import type { AssessmentResult } from './types/assessment';
 import { DEFAULT_USER, type TeacherUser } from './types/user';
+
+import {
+  getSchoolAssessmentHistory,
+  saveAssessmentResult,
+} from './data/assessmentStore';
 
 import Sidebar from './components/Sidebar';
 import TopHeader from './components/TopHeader';
@@ -22,27 +29,19 @@ import { notificationStore } from './data/notificationStore';
 
 import { processAssessment } from './services/api';
 
-
-
-
 export default function App() {
-
   // =========================================================
   // USER
   // =========================================================
 
   const [user, setUser] = useState<TeacherUser>(() => {
-
     try {
-
-      const stored = localStorage.getItem(
-        'veda_educator_user'
-      );
+      const stored = localStorage.getItem('veda_educator_user');
 
       if (stored) {
-
         const parsed = JSON.parse(stored);
 
+        // Reset old demo user if it exists
         if (parsed.name === 'Madhur Rastogi') {
           return DEFAULT_USER;
         }
@@ -51,15 +50,10 @@ export default function App() {
       }
 
       return DEFAULT_USER;
-
     } catch {
-
       return DEFAULT_USER;
-
     }
-
   });
-
 
   // =========================================================
   // NAVIGATION
@@ -69,7 +63,6 @@ export default function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(false);
-
 
   // =========================================================
   // ASSESSMENT STATE
@@ -93,6 +86,26 @@ export default function App() {
   const [error, setError] =
     useState('');
 
+  // =========================================================
+  // SELECTED CLASSROOM STUDENT
+  // =========================================================
+
+  const [
+    selectedClassroomStudent,
+    setSelectedClassroomStudent,
+  ] = useState<Student | null>(null);
+
+  // =========================================================
+  // ASSESSMENT HISTORY
+  // School-specific history
+  // =========================================================
+
+  const [
+    assessmentHistory,
+    setAssessmentHistory,
+  ] = useState(() =>
+    getSchoolAssessmentHistory(user.school.id)
+  );
 
   // =========================================================
   // MODALS
@@ -110,116 +123,120 @@ export default function App() {
   const [isProfileOpen, setIsProfileOpen] =
     useState(false);
 
-
   // =========================================================
   // SAVE USER
   // =========================================================
 
   useEffect(() => {
-
-    if (user) {
-
-      localStorage.setItem(
-        'veda_educator_user',
-        JSON.stringify(user)
-      );
-
-    }
-
+    localStorage.setItem(
+      'veda_educator_user',
+      JSON.stringify(user)
+    );
   }, [user]);
 
-
   // =========================================================
-  // COLLAPSE SIDEBAR DURING PROCESSING / RESULTS
+  // RELOAD ASSESSMENT HISTORY
+  // WHEN SCHOOL CHANGES
   // =========================================================
 
   useEffect(() => {
+    const schoolHistory =
+      getSchoolAssessmentHistory(user.school.id);
 
+    setAssessmentHistory(schoolHistory);
+
+    // Clear current temporary result when changing school
+    setResult(null);
+
+    // Clear selected student
+    setSelectedClassroomStudent(null);
+  }, [user.school.id]);
+
+  // =========================================================
+  // COLLAPSE SIDEBAR
+  // DURING PROCESSING / RESULTS
+  // =========================================================
+
+  useEffect(() => {
     if (loading || result) {
-
       setSidebarCollapsed(true);
-
     }
-
   }, [loading, result]);
-
 
   // =========================================================
   // ANALYZE ASSESSMENT
   // =========================================================
 
   const handleAnalyze = async () => {
-
     // -------------------------------------------------------
-    // Validate question paper
+    // VALIDATE QUESTION PAPER
     // -------------------------------------------------------
 
     if (!questionFile) {
-
-      setError(
-        'Please upload a question paper.'
-      );
-
+      setError('Please upload a question paper.');
       return;
-
     }
 
-
     // -------------------------------------------------------
-    // Validate answer sheet
+    // VALIDATE ANSWER SHEETS
     // -------------------------------------------------------
 
     if (answerFiles.length === 0) {
-
       setError(
         'Please upload at least one student answer sheet.'
       );
-
       return;
-
     }
 
-
     try {
-
       setLoading(true);
-
       setError('');
-
       setResult(null);
 
-
       // -----------------------------------------------------
-      // Call backend API
+      // CALL BACKEND
       // -----------------------------------------------------
 
       const data = await processAssessment({
-
         questionFile,
-
         answerFiles,
-
         studentNames,
-
       });
 
-
       // -----------------------------------------------------
-      // Save result
+      // SET CURRENT RESULT
       // -----------------------------------------------------
 
       setResult(data);
 
+      // -----------------------------------------------------
+      // SAVE RESULT TO SCHOOL HISTORY
+      // -----------------------------------------------------
+
+      const savedAssessment =
+        saveAssessmentResult(
+          data,
+          user.school.id,
+          user.school.name
+        );
+
+      // Update UI immediately
+      setAssessmentHistory((previous) => [
+        savedAssessment,
+        ...previous,
+      ]);
 
       // -----------------------------------------------------
-      // Notification
+      // NOTIFICATION
       // -----------------------------------------------------
 
-      const count = data.students?.length ?? 1;
+      const count =
+        data.students?.length ?? 1;
 
       const topScorer =
         data.students?.[0]?.student_name ??
         data.student_name ??
+        selectedClassroomStudent?.name ??
         'Student';
 
       const topScore =
@@ -234,53 +251,40 @@ export default function App() {
 
       notificationStore.addNotification({
         title: 'Assessment Grading Complete',
+
         message:
           `Evaluated ${count} student answer sheet` +
           `${count > 1 ? 's' : ''}. ` +
           `Score: ${topScorer} (${topScore}/${topMaxScore}).`,
+
         type: 'success',
+
         targetTab: 'exams',
       });
-
-
     } catch (err) {
-
       console.error(
         'Assessment processing error:',
         err
       );
 
-
       // -----------------------------------------------------
-      // Axios error
+      // AXIOS ERROR
       // -----------------------------------------------------
 
       if (axios.isAxiosError(err)) {
-
         const detail =
           err.response?.data?.detail;
 
-
-        // Backend may return string
+        // Backend returned plain string
         if (typeof detail === 'string') {
-
           setError(detail);
-
         }
 
-        // Backend may return:
-        // {
-        //   success: false,
-        //   error: {
-        //      message: "..."
-        //   }
-        // }
-
+        // Backend returned object
         else if (
           detail &&
           typeof detail === 'object'
         ) {
-
           const errorObject =
             detail as {
               message?: unknown;
@@ -289,80 +293,54 @@ export default function App() {
               };
             };
 
-
           if (
             errorObject.error &&
             typeof errorObject.error === 'object' &&
             errorObject.error.message
           ) {
-
             setError(
               String(
                 errorObject.error.message
               )
             );
-
-          }
-
-          else if (
-            errorObject.message
-          ) {
-
+          } else if (errorObject.message) {
             setError(
-              String(
-                errorObject.message
-              )
+              String(errorObject.message)
             );
-
-          }
-
-          else {
-
+          } else {
             setError(
               'Failed to process assessment. Please try again.'
             );
-
           }
-
         }
 
+        // No usable detail
         else {
-
           setError(
             'Failed to process assessment. Please try again.'
           );
-
         }
-
       }
 
       // -----------------------------------------------------
-      // Unknown error
+      // UNKNOWN ERROR
       // -----------------------------------------------------
 
       else {
-
         setError(
           'Failed to process assessment. Please try again.'
         );
-
       }
-
     } finally {
-
       setLoading(false);
-
     }
-
   };
-
 
   // =========================================================
   // RESET
   // =========================================================
 
   const handleReset = () => {
-
     setQuestionFile(null);
 
     setAnswerFiles([]);
@@ -373,104 +351,80 @@ export default function App() {
 
     setError('');
 
+    setSelectedClassroomStudent(null);
+
     setActiveTab('exams');
 
     setSidebarCollapsed(false);
-
   };
-
 
   // =========================================================
   // SIGN OUT
   // =========================================================
 
   const handleSignOut = () => {
-
     setUser(DEFAULT_USER);
 
     handleReset();
 
     setIsProfileOpen(false);
-
   };
-
 
   // =========================================================
   // CLOSE DROPDOWNS
   // =========================================================
 
   useEffect(() => {
-
     const handleDocumentClick = () => {
-
       setIsNotifOpen(false);
-
       setIsProfileOpen(false);
-
     };
-
 
     window.addEventListener(
       'click',
       handleDocumentClick
     );
 
-
     return () => {
-
       window.removeEventListener(
         'click',
         handleDocumentClick
       );
-
     };
-
   }, []);
-
 
   // =========================================================
   // UI
   // =========================================================
 
   return (
-
     <div className="veda-layout">
-
 
       {/* ===================================================
           SIDEBAR
       =================================================== */}
 
       <Sidebar
-
         activeTab={activeTab}
 
         onSelectTab={(tab) => {
-
           setActiveTab(tab);
-
         }}
 
         onOpenToolkit={() => {
-
           setIsToolkitOpen(true);
-
         }}
 
         collapsed={sidebarCollapsed}
 
         onToggleCollapse={() => {
-
           setSidebarCollapsed(
             !sidebarCollapsed
           );
-
         }}
 
         school={user.school}
-
       />
-
 
       {/* ===================================================
           MAIN CONTENT
@@ -478,13 +432,11 @@ export default function App() {
 
       <div className="veda-main-content">
 
-
         {/* =================================================
             HEADER
         ================================================= */}
 
         <TopHeader
-
           activeTab={activeTab}
 
           onSelectTab={setActiveTab}
@@ -499,35 +451,27 @@ export default function App() {
           onReset={handleReset}
 
           onOpenHelp={() => {
-
             setIsHelpOpen(true);
-
           }}
 
           onOpenNotifications={() => {
-
             setIsProfileOpen(false);
 
             setIsNotifOpen(
               !isNotifOpen
             );
-
           }}
 
           onOpenToolkit={() => {
-
             setIsToolkitOpen(true);
-
           }}
 
           onToggleProfile={() => {
-
             setIsNotifOpen(false);
 
             setIsProfileOpen(
               !isProfileOpen
             );
-
           }}
 
           isProfileOpen={isProfileOpen}
@@ -539,15 +483,10 @@ export default function App() {
           onSignOut={handleSignOut}
 
           onOpenSettings={() => {
-
             setIsProfileOpen(false);
-
             setActiveTab('settings');
-
           }}
-
         />
-
 
         {/* =================================================
             BODY
@@ -555,87 +494,83 @@ export default function App() {
 
         <main className="veda-body">
 
-
-          {/* =================================================
+          {/* ===============================================
               HOME
-          ================================================= */}
+          =============================================== */}
 
           {activeTab === 'home' ? (
 
             <HomeDashboard
-
               user={user}
 
+              assessmentHistory={
+                assessmentHistory
+              }
+
               onGoToExams={() => {
-
                 setActiveTab('exams');
-
               }}
 
               onGoToAssignments={() => {
-
                 setActiveTab('assignments');
-
               }}
 
               onGoToClassroom={() => {
-
                 setActiveTab('classroom');
-
               }}
-
             />
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              CLASSROOM
-          ================================================= */
+          =============================================== */
 
           : activeTab === 'classroom' ? (
 
             <ClassroomView
-
               user={user}
 
-              onEvaluateStudentSheet={() => {
+              assessmentHistory={
+                assessmentHistory
+              }
+
+              onEvaluateStudentSheet={(student) => {
+                if (student) {
+                  setSelectedClassroomStudent(student);
+                }
+
+                setResult(null);
 
                 setActiveTab('exams');
-
               }}
-
             />
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              ASSIGNMENTS
-          ================================================= */
+          =============================================== */
 
           : activeTab === 'assignments' ? (
 
             <AssignmentsDashboard
-
-              batchSummary={
-                result?.batch_summary
+              assessmentHistory={
+                assessmentHistory
               }
 
               onOpenExamUpload={() => {
+                setResult(null);
 
                 setActiveTab('exams');
-
               }}
-
             />
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              LIBRARY
-          ================================================= */
+          =============================================== */
 
           : activeTab === 'library' ? (
 
@@ -645,31 +580,25 @@ export default function App() {
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              SETTINGS
-          ================================================= */
+          =============================================== */
 
           : activeTab === 'settings' ? (
 
             <SettingsView
-
               user={user}
 
               onUpdateUser={(updated) => {
-
                 setUser(updated);
-
               }}
-
             />
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              PROCESSING
-          ================================================= */
+          =============================================== */
 
           : loading ? (
 
@@ -677,81 +606,66 @@ export default function App() {
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              RESULTS
-          ================================================= */
+          =============================================== */
 
           : result ? (
 
             <ResultsView
-
               result={result}
 
               school={user.school}
 
               onReset={handleReset}
-
             />
 
           )
 
-
-          /* =================================================
+          /* ===============================================
              UPLOAD
-          ================================================= */
+          =============================================== */
 
           : (
 
             <UploadView
-
               questionFile={questionFile}
 
               answerFiles={answerFiles}
 
               studentNames={studentNames}
 
+              selectedStudent={
+                selectedClassroomStudent
+              }
 
               setQuestionFile={(file) => {
-
                 setQuestionFile(file);
 
                 if (error) {
-
                   setError('');
-
                 }
-
               }}
 
-
               setAnswerFiles={(files) => {
-
                 setAnswerFiles(files);
 
                 if (error) {
-
                   setError('');
-
                 }
-
               }}
-
 
               setStudentNames={
                 setStudentNames
               }
 
-
               onAnalyze={
                 handleAnalyze
               }
 
-
               loading={loading}
 
               error={error}
-
             />
 
           )}
@@ -760,7 +674,6 @@ export default function App() {
 
       </div>
 
-
       {/* ===================================================
           HELP MODAL
       =================================================== */}
@@ -768,33 +681,22 @@ export default function App() {
       {isHelpOpen && (
 
         <HelpModal
-
           onClose={() => {
-
             setIsHelpOpen(false);
-
           }}
 
           onOpenExams={() => {
-
             setIsHelpOpen(false);
-
             setActiveTab('exams');
-
           }}
 
           onOpenStudio={() => {
-
             setIsHelpOpen(false);
-
             setActiveTab('library');
-
           }}
-
         />
 
       )}
-
 
       {/* ===================================================
           TOOLKIT MODAL
@@ -803,49 +705,33 @@ export default function App() {
       {isToolkitOpen && (
 
         <ToolkitModal
-
           onClose={() => {
-
             setIsToolkitOpen(false);
-
           }}
 
           onGoToExams={() => {
-
             setActiveTab('exams');
-
           }}
 
           onGoToLibrary={() => {
-
             setActiveTab('library');
-
           }}
 
           onGoToAssignments={() => {
-
             setActiveTab('assignments');
-
           }}
 
           onGoToClassroom={() => {
-
             setActiveTab('classroom');
-
           }}
 
           onGoToSettings={() => {
-
             setActiveTab('settings');
-
           }}
-
         />
 
       )}
 
     </div>
-
   );
-
 }

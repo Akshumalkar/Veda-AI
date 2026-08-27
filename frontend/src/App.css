@@ -716,6 +716,32 @@ button {
   height: 100%;
 }
 
+.extracting-spinner-container {
+  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.extracting-rolling-circle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rolling-spinner-svg {
+  animation: rolling-circle-spin 1s linear infinite;
+}
+
+@keyframes rolling-circle-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
 .extracting-sparkle-center {
   margin-bottom: 24px;
   animation: pulse-sparkles 2.2s infinite ease-in-out;

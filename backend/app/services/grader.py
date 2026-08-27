@@ -1,306 +1,754 @@
-import base64
 import json
 import re
 from time import sleep
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from google.genai import types
-
-from app.services.gemini_client import client
-from app.utils.pdf import pdf_to_images
+from app.services.groq_client import client, MODEL_NAME
 
 
 GRADING_PROMPT = """
-You are an expert teacher grading a student's handwritten examination answer sheet.
+You are an expert examination evaluator.
 
-You will be given a JSON list of matched question-answer pairs
-(question text, answer text, max_marks), plus the question paper images
-and answer sheet images for visual context.
+You are grading ONE examination question at a time.
 
-For EACH item:
+Evaluate the student's answer against the question.
 
-- status=answered:
-  Assign a score from 0 to max_marks.
-  Write 1-2 sentences of constructive feedback.
+IMPORTANT RULES:
 
-- status=unanswered:
-  score=0
-  feedback="Not attempted."
+1. Grade only the provided question.
+2. Grade only the provided student answer.
+3. Do not invent missing content.
+4. Do not give marks for information that the student did not write.
+5. If the student answer is empty, give 0 marks.
+6. Consider relevant theory, definitions, formulas, calculations,
+   chemical equations, diagrams, and explanations.
+7. For numerical questions, check:
+   - formula
+   - substitution
+   - calculation
+   - final answer
+8. For chemistry questions, consider:
+   - correct chemical equation
+   - correct formula
+   - correct terminology
+   - correct explanation
+9. Award partial marks when appropriate.
+10. Do not exceed the maximum marks.
+11. Keep feedback concise and useful.
+12. Return valid JSON only.
+13. Do not use markdown.
+14. Do not include explanations outside JSON.
 
-- status=parent:
-  score=0
-  feedback=""
-
-SCORING RULES:
-
-- Full marks: complete and accurate answer.
-- Partial marks: partially correct or incomplete answer.
-- 0: incorrect, irrelevant, or missing answer.
-- Never give marks merely because an answer exists.
-- Evaluate the actual content of the student's answer.
-- Do not invent information that is not present in the answer.
-
-Return ONLY valid JSON:
+Return exactly this structure:
 
 {
-  "grades": [
-    {
-      "question_id": "q1",
-      "score": 4,
-      "max_score": 5,
-      "feedback": "Good explanation. Accurate scientific terms used."
-    }
-  ]
+  "question_number": "1",
+  "marks_awarded": 4,
+  "max_marks": 5,
+  "status": "correct",
+  "feedback": "The answer correctly explains the main concept but one example is missing."
 }
+
+Allowed status values:
+
+"correct"
+"partially_correct"
+"incorrect"
+"unanswered"
 """
 
 
 def clean_json_text(text: str) -> str:
+    """
+    Remove markdown code fences, think tags, and extract JSON object.
+    """
+
+    if not text:
+        return ""
+
     text = text.strip()
+
+    # Remove reasoning/think tags if returned by Groq models.
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
 
     match = re.search(
         r"```(?:json)?\s*([\s\S]*?)\s*```",
         text,
+        flags=re.IGNORECASE,
     )
 
     if match:
-        return match.group(1).strip()
+        text = match.group(1).strip()
 
-    return text
+    first = text.find("{")
+    last = text.rfind("}")
+
+    if (
+        first != -1
+        and last != -1
+        and last > first
+    ):
+        text = text[first:last + 1]
+
+    return text.strip()
 
 
-def grade_answers(
-    matches: List[Dict[str, Any]],
-    question_bytes: bytes,
-    question_content_type: str,
-    answer_bytes: bytes,
-    answer_content_type: str,
-) -> List[Dict[str, Any]]:
+def safe_int(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """
+    Safely convert a value to integer.
+    """
 
-    matches_for_grading = []
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
-    for match in matches:
-        question = match.get("question") or {}
-        answer = match.get("answer") or {}
 
-        matches_for_grading.append(
-            {
-                "question_id": match.get("question_id"),
-                "question_number": match.get("question_number"),
-                "question_text": question.get("text", ""),
-                "max_marks": question.get("max_marks", 5),
-                "status": match.get("status"),
-                "answer_text": answer.get("text", "") if answer else "",
-            }
-        )
+def safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
+    """
+    Safely convert a value to float.
+    """
 
-    pairs_json = json.dumps(
-        matches_for_grading,
-        indent=2,
-        ensure_ascii=False,
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def sanitize_grade(
+    result: Dict[str, Any],
+    question_number: str,
+    max_marks: int,
+    question_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Validate and normalize one grading result.
+    """
+
+    if not isinstance(result, dict):
+        result = {}
+
+    awarded = safe_float(
+        result.get(
+            "score",
+            result.get(
+                "marks_awarded",
+                0,
+            ),
+        ),
+        0.0,
     )
 
-    contents: List[Any] = [
-        GRADING_PROMPT,
-        "Matched pairs:\n"
-        + pairs_json
-        + "\n\nVisual references follow:\n",
-    ]
+    awarded = max(
+        0.0,
+        min(
+            float(max_marks),
+            awarded,
+        ),
+    )
 
-    # ---------------------------------------------------------
-    # Question paper images
-    # ---------------------------------------------------------
-
-    if question_content_type == "application/pdf":
-
-        question_pages = pdf_to_images(
-            question_bytes
+    status = str(
+        result.get(
+            "status",
+            "incorrect",
         )
+    ).strip().lower()
 
-        for page in question_pages:
-            contents.append(
-                "Question paper page "
-                + str(page["page"])
-                + ":"
-            )
+    allowed_statuses = {
+        "correct",
+        "partially_correct",
+        "incorrect",
+        "unanswered",
+    }
 
-            contents.append(
-                types.Part.from_bytes(
-                    data=base64.b64decode(
-                        page["image"]
-                    ),
-                    mime_type="image/png",
-                )
-            )
+    if status not in allowed_statuses:
+        status = "incorrect"
+
+    feedback = result.get(
+        "feedback",
+        "",
+    )
+
+    if feedback is None:
+        feedback = ""
+
+    feedback = str(
+        feedback
+    ).strip()
+
+    if awarded == 0 and not feedback:
+        feedback = "No valid answer was provided."
+
+    if awarded == float(max_marks):
+        if status == "incorrect":
+            status = "correct"
+
+    elif awarded > 0:
+        if status == "correct" and awarded < float(max_marks):
+            status = "partially_correct"
 
     else:
+        if status not in {
+            "unanswered",
+            "incorrect",
+        }:
+            status = "incorrect"
 
-        contents.append(
-            "Question paper:"
-        )
+    return {
+        "question_id": question_id,
+        "question_number": str(
+            question_number
+        ),
+        "score": awarded,
+        "max_score": max_marks,
+        "marks_awarded": awarded,
+        "max_marks": max_marks,
+        "status": status,
+        "feedback": feedback,
+    }
 
-        contents.append(
-            types.Part.from_bytes(
-                data=question_bytes,
-                mime_type=(
-                    question_content_type
-                    or "image/jpeg"
-                ),
-            )
+
+def grade_single_question(
+    question: Dict[str, Any],
+    answer_text: str,
+    max_marks: int,
+    question_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Grade one question independently.
+
+    This is intentionally done one question at a time
+    to avoid Groq TPM errors when a complete assessment
+    is sent in one large request.
+    """
+
+    question_id = question_id or question.get("id") or question.get("question_id")
+
+    question_number = str(
+        question.get(
+            "number",
+            question.get(
+                "question_number",
+                "",
+            ),
         )
+    )
+
+    question_text = str(
+        question.get(
+            "text",
+            "",
+        )
+    ).strip()
+
+    answer_text = str(
+        answer_text or ""
+    ).strip()
+
+    max_marks = safe_int(
+        max_marks,
+        5,
+    )
+
+    if max_marks <= 0:
+        max_marks = 5
 
     # ---------------------------------------------------------
-    # Student answer sheet images
+    # Unanswered question
     # ---------------------------------------------------------
 
-    if answer_content_type == "application/pdf":
+    if not answer_text:
 
-        answer_pages = pdf_to_images(
-            answer_bytes
-        )
+        return {
+            "question_id": question_id,
+            "question_number": question_number,
+            "score": 0,
+            "max_score": max_marks,
+            "marks_awarded": 0,
+            "max_marks": max_marks,
+            "status": "unanswered",
+            "feedback": "No answer was written for this question.",
+        }
 
-        for page in answer_pages:
-            contents.append(
-                "Answer sheet page "
-                + str(page["page"])
-                + ":"
-            )
+    user_prompt = f"""
+{GRADING_PROMPT}
 
-            contents.append(
-                types.Part.from_bytes(
-                    data=base64.b64decode(
-                        page["image"]
-                    ),
-                    mime_type="image/png",
-                )
-            )
+QUESTION NUMBER:
+{question_number}
 
-    else:
+MAXIMUM MARKS:
+{max_marks}
 
-        contents.append(
-            "Answer sheet:"
-        )
+QUESTION:
+{question_text}
 
-        contents.append(
-            types.Part.from_bytes(
-                data=answer_bytes,
-                mime_type=(
-                    answer_content_type
-                    or "image/jpeg"
-                ),
-            )
-        )
+STUDENT ANSWER:
+{answer_text}
+
+Now evaluate this answer.
+
+Return JSON only.
+"""
+
+    last_error: Optional[Exception] = None
 
     # ---------------------------------------------------------
-    # Gemini grading
+    # Retry only temporary failures
     # ---------------------------------------------------------
-
-    last_error = None
 
     for attempt in range(3):
 
         try:
 
             print(
-                f"Gemini grading attempt "
-                f"{attempt + 1}/3..."
+                f"Groq grading Q{question_number} "
+                f"attempt {attempt + 1}/3..."
             )
 
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
+            response = (
+                client.chat.completions.create(
+                    model=MODEL_NAME,
+
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        }
+                    ],
+
+                    temperature=0,
+
+                    max_completion_tokens=500,
+
+                    response_format={
+                        "type": "json_object"
+                    },
+
+                    reasoning_effort="none",
+                )
+            )
+
+            raw = (
+                response
+                .choices[0]
+                .message
+                .content
             )
 
             raw = clean_json_text(
-                response.text
+                raw
             )
 
-            result = json.loads(raw)
-
-            grades = result.get(
-                "grades",
-                []
-            )
-
-            if not isinstance(
-                grades,
-                list,
-            ):
+            if not raw:
                 raise ValueError(
-                    "Gemini returned an invalid grades format."
+                    "Groq returned an empty grading response."
                 )
 
-            print(
-                f"Gemini grading completed: "
-                f"{len(grades)} grades returned."
+            result = json.loads(
+                raw
             )
 
-            return grades
+            return sanitize_grade(
+                result,
+                question_number,
+                max_marks,
+                question_id=question_id,
+            )
+
+        except json.JSONDecodeError as error:
+
+            last_error = error
+
+            print(
+                f"Invalid JSON while grading "
+                f"Q{question_number}: {error}"
+            )
+
+            if attempt < 2:
+                sleep(
+                    (attempt + 1) * 2
+                )
 
         except Exception as error:
 
             last_error = error
 
-            error_message = str(error)
+            error_message = str(
+                error
+            )
 
             print(
-                f"Gemini grading attempt "
-                f"{attempt + 1}/3 failed: "
+                f"Groq grading Q{question_number} "
+                f"attempt {attempt + 1}/3 failed: "
                 f"{error_message}"
             )
 
             # -------------------------------------------------
-            # NEVER retry quota/rate-limit errors
+            # Rate limits / oversized requests
             # -------------------------------------------------
 
             if (
                 "429" in error_message
-                or "RESOURCE_EXHAUSTED" in error_message
+                or "413" in error_message
+                or "rate_limit" in error_message.lower()
+                or "rate limit" in error_message.lower()
+                or "tokens per minute" in error_message.lower()
+                or "requested" in error_message.lower()
+                and "tokens" in error_message.lower()
             ):
 
                 print(
-                    "Gemini quota/rate limit reached. "
-                    "Stopping grading retries immediately."
+                    f"Groq limit reached while grading "
+                    f"Q{question_number}."
                 )
 
                 raise error
-
-            # -------------------------------------------------
-            # Retry other temporary errors
-            # -------------------------------------------------
 
             if attempt < 2:
 
                 wait_seconds = (
                     attempt + 1
-                ) * 3
+                ) * 2
 
                 print(
-                    f"Retrying grading in "
-                    f"{wait_seconds} seconds..."
+                    f"Retrying Q{question_number} "
+                    f"in {wait_seconds} seconds..."
                 )
 
                 sleep(
                     wait_seconds
                 )
 
-    # ---------------------------------------------------------
-    # IMPORTANT:
-    # Never return fake/full marks.
-    # Propagate the real error.
-    # ---------------------------------------------------------
-
-    print(
-        "Gemini grading failed after all retries."
-    )
-
     if last_error:
         raise last_error
 
     raise RuntimeError(
-        "Gemini grading failed without an available error."
+        f"Grading failed for question "
+        f"{question_number}."
+    )
+
+
+def combine_answer_text(
+    answers: List[Dict[str, Any]],
+) -> str:
+    """
+    Combine multiple answer objects belonging
+    to the same question.
+
+    This is important when an answer continues
+    onto another page.
+    """
+
+    if not answers:
+        return ""
+
+    parts = []
+
+    for answer in answers:
+
+        if not isinstance(
+            answer,
+            dict,
+        ):
+            continue
+
+        text = answer.get(
+            "text",
+            "",
+        )
+
+        if text:
+
+            text = str(
+                text
+            ).strip()
+
+            if text:
+                parts.append(
+                    text
+                )
+
+    return "\n".join(
+        parts
+    ).strip()
+
+
+def grade_assessment(
+    questions: List[Dict[str, Any]],
+    answers: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Grade the complete assessment one question at a time.
+
+    This avoids sending the entire assessment in one
+    large Groq request.
+
+    Answers with the same question number are combined.
+    """
+
+    print(
+        "\n========== STARTING QUESTION-BY-QUESTION GRADING =========="
+    )
+
+    # ---------------------------------------------------------
+    # Group answers by question number
+    # ---------------------------------------------------------
+
+    answer_map: Dict[
+        str,
+        List[Dict[str, Any]]
+    ] = {}
+
+    for answer in answers:
+
+        if not isinstance(
+            answer,
+            dict,
+        ):
+            continue
+
+        question_number = answer.get(
+            "question_number"
+        )
+
+        if question_number is None:
+            continue
+
+        question_number = str(
+            question_number
+        ).strip()
+
+        if not question_number:
+            continue
+
+        answer_map.setdefault(
+            question_number,
+            []
+        ).append(
+            answer
+        )
+
+    grades = []
+
+    # ---------------------------------------------------------
+    # Grade every question
+    # ---------------------------------------------------------
+
+    for index, question in enumerate(
+        questions,
+        start=1,
+    ):
+
+        if not isinstance(
+            question,
+            dict,
+        ):
+            continue
+
+        question_number = str(
+            question.get(
+                "number",
+                question.get(
+                    "question_number",
+                    index,
+                ),
+            )
+        ).strip()
+
+        max_marks = safe_int(
+            question.get(
+                "max_marks",
+                5,
+            ),
+            5,
+        )
+
+        if max_marks <= 0:
+            max_marks = 5
+
+        matching_answers = answer_map.get(
+            question_number,
+            []
+        )
+
+        answer_text = combine_answer_text(
+            matching_answers
+        )
+
+        print(
+            f"\n----------------------------------------"
+        )
+
+        print(
+            f"QUESTION {question_number}"
+        )
+
+        print(
+            f"Max marks: {max_marks}"
+        )
+
+        print(
+            f"Answer objects: "
+            f"{len(matching_answers)}"
+        )
+
+        # -----------------------------------------------------
+        # Grade
+        # -----------------------------------------------------
+
+        grade = grade_single_question(
+            question=question,
+            answer_text=answer_text,
+            max_marks=max_marks,
+            question_id=question.get("id"),
+        )
+
+        grades.append(
+            grade
+        )
+
+        print(
+            f"RESULT Q{question_number}: "
+            f"{grade['marks_awarded']}/"
+            f"{grade['max_marks']} "
+            f"({grade['status']})"
+        )
+
+        # Small delay between questions to avoid
+        # immediately consuming the TPM window.
+        sleep(0.5)
+
+    print(
+        "\n========== GRADING COMPLETE =========="
+    )
+
+    total_marks = sum(
+        safe_float(
+            grade.get(
+                "marks_awarded",
+                0,
+            )
+        )
+        for grade in grades
+    )
+
+    maximum_marks = sum(
+        safe_float(
+            grade.get(
+                "max_marks",
+                0,
+            )
+        )
+        for grade in grades
+    )
+
+    print(
+        f"Total score: "
+        f"{total_marks}/{maximum_marks}"
+    )
+
+    return grades
+
+
+# -------------------------------------------------------------
+# Backward-compatible function name
+# -------------------------------------------------------------
+
+def grade_answers(
+    matches_or_questions: List[Dict[str, Any]],
+    question_bytes_or_answers: Any = None,
+    question_content_type: Optional[str] = None,
+    answer_bytes: Optional[bytes] = None,
+    answer_content_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Grade answers.
+
+    Supports both signatures:
+    1. grade_answers(matches, question_bytes, q_content_type, sheet_bytes, a_content_type)
+    2. grade_answers(questions, answers)
+    """
+
+    # If first parameter is the list of matches from mapping.py
+    if matches_or_questions and isinstance(matches_or_questions, list):
+        first_item = matches_or_questions[0]
+        if isinstance(first_item, dict) and (
+            "question" in first_item
+            or "answer" in first_item
+            or "answer_id" in first_item
+            or "question_id" in first_item
+        ):
+            print("\n========== STARTING QUESTION-BY-QUESTION GRADING FROM MATCHES ==========")
+            grades = []
+            for match in matches_or_questions:
+                if not isinstance(match, dict):
+                    continue
+
+                question = match.get("question") or {}
+                answer = match.get("answer") or {}
+                question_id = match.get("question_id") or question.get("id")
+                question_number = str(
+                    match.get("question_number")
+                    or question.get("number")
+                    or question.get("question_number", "")
+                ).strip()
+                max_marks = safe_int(
+                    question.get("max_marks", match.get("max_marks", 5)),
+                    5,
+                )
+                if max_marks <= 0:
+                    max_marks = 5
+
+                status = match.get("status")
+                answer_text = str(
+                    answer.get("text", "") if isinstance(answer, dict) else ""
+                ).strip()
+
+                if status == "unanswered" or not answer_text:
+                    print(f"\n----------------------------------------\nQUESTION {question_number} (Unanswered)")
+                    grade = {
+                        "question_id": question_id,
+                        "question_number": question_number,
+                        "score": 0,
+                        "max_score": max_marks,
+                        "marks_awarded": 0,
+                        "max_marks": max_marks,
+                        "status": "unanswered",
+                        "feedback": "Not attempted.",
+                    }
+                    grades.append(grade)
+                    continue
+
+                print(f"\n----------------------------------------\nQUESTION {question_number}")
+                print(f"Max marks: {max_marks}")
+                grade = grade_single_question(
+                    question=question,
+                    answer_text=answer_text,
+                    max_marks=max_marks,
+                    question_id=question_id,
+                )
+                grades.append(grade)
+                print(
+                    f"RESULT Q{question_number}: "
+                    f"{grade['marks_awarded']}/"
+                    f"{grade['max_marks']} "
+                    f"({grade['status']})"
+                )
+                sleep(0.5)
+
+            print("\n========== GRADING COMPLETE ==========")
+            total_marks = sum(safe_float(g.get("marks_awarded", 0)) for g in grades)
+            maximum_marks = sum(safe_float(g.get("max_marks", 0)) for g in grades)
+            print(f"Total score: {total_marks}/{maximum_marks}")
+            return grades
+
+    return grade_assessment(
+        questions=matches_or_questions,
+        answers=question_bytes_or_answers if isinstance(question_bytes_or_answers, list) else [],
     )

@@ -14,6 +14,7 @@ import type { TeacherUser } from '../types/user';
 
 type HomeDashboardProps = {
   user: TeacherUser;
+  assessmentHistory?: any[];
   onGoToExams: () => void;
   onGoToAssignments: () => void;
   onGoToClassroom: () => void;

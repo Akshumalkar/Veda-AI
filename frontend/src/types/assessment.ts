@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // VEDA AI ASSESSMENT - ASSESSMENT TYPES
 // ============================================================
 
@@ -248,6 +248,8 @@ export interface BatchSummary {
 
 export interface AssessmentResult {
   success: boolean;
+
+  student_id?: string;
 
   student_name?: string;
 

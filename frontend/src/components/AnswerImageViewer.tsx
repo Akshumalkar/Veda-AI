@@ -1,5 +1,12 @@
 import { useRef, useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Minus, Plus, AlertCircle } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Minus,
+  Plus,
+  AlertCircle,
+} from 'lucide-react';
+
 import type { AnswerPage, Region } from '../types/assessment';
 
 type Props = {
@@ -8,32 +15,49 @@ type Props = {
   selectedQuestionNumber?: string;
 };
 
-export default function AnswerImageViewer({ pages, regions, selectedQuestionNumber = 'Q1' }: Props) {
+export default function AnswerImageViewer({
+  pages,
+  regions,
+  selectedQuestionNumber = 'Q1',
+}: Props) {
   const [zoom, setZoom] = useState(1);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
 
-  // Group regions by page
+  // Group answer regions by page
   const regionsByPage: Record<number, Region[]> = {};
+
   for (const region of regions) {
-    const p = region.page || 1;
-    if (!regionsByPage[p]) regionsByPage[p] = [];
-    regionsByPage[p].push(region);
+    const pageNumber = region.page || 1;
+
+    if (!regionsByPage[pageNumber]) {
+      regionsByPage[pageNumber] = [];
+    }
+
+    regionsByPage[pageNumber].push(region);
   }
 
-  // Auto-switch to the page where this answer appears
+  // Automatically switch to the first page containing
+  // the selected answer region.
   useEffect(() => {
-    if (regions && regions.length > 0) {
+    if (regions.length > 0) {
       const targetPage = regions[0].page || 1;
-      const idx = pages.findIndex((p) => p.page === targetPage);
-      if (idx !== -1) {
-        setCurrentPageIndex(idx);
+
+      const pageIndex = pages.findIndex(
+        (page) => page.page === targetPage
+      );
+
+      if (pageIndex !== -1) {
+        setCurrentPageIndex(pageIndex);
       }
     }
   }, [regions, pages]);
 
-  // If pages change (e.g. switching between students with different page counts), ensure valid index
+  // Keep page index valid when pages change.
   useEffect(() => {
-    if (currentPageIndex >= pages.length) {
+    if (
+      pages.length > 0 &&
+      currentPageIndex >= pages.length
+    ) {
       setCurrentPageIndex(0);
     }
   }, [pages, currentPageIndex]);
@@ -42,64 +66,107 @@ export default function AnswerImageViewer({ pages, regions, selectedQuestionNumb
     return (
       <div className="figma-answer-sheet-container">
         <div className="sheet-top-dark-bar">
-          <div className="sheet-title-text">Answer Sheet</div>
+          <div className="sheet-title-text">
+            Answer Sheet
+          </div>
         </div>
+
         <div className="sheet-scroll-viewport">
-          <div className="empty-sheet-msg">No answer sheet pages available for this student.</div>
+          <div className="empty-sheet-msg">
+            No answer sheet pages available for this student.
+          </div>
         </div>
       </div>
     );
   }
 
-  const activePage = pages[currentPageIndex] || pages[0];
+  const activePage =
+    pages[currentPageIndex] || pages[0];
+
+  const activeRegions =
+    regionsByPage[activePage.page] || [];
 
   return (
     <div className="figma-answer-sheet-container">
-      {/* Dark Top Toolbar */}
+      {/* Toolbar */}
       <div className="sheet-top-dark-bar">
         <div className="sheet-title-text">
           Answer Sheet — Page {activePage.page} of {pages.length}
         </div>
 
         <div className="sheet-toolbar-controls">
-          {/* Zoom Control */}
+
+          {/* Zoom */}
           <div className="dark-pill-btn zoom-pill">
             <button
-              onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
-              title="Zoom out"
               type="button"
+              title="Zoom out"
+              onClick={() =>
+                setZoom((z) =>
+                  Math.max(
+                    0.6,
+                    +(z - 0.15).toFixed(2)
+                  )
+                )
+              }
             >
               <Minus size={13} />
             </button>
-            <span className="zoom-text">{Math.round(zoom * 100)}%</span>
+
+            <span className="zoom-text">
+              {Math.round(zoom * 100)}%
+            </span>
+
             <button
-              onClick={() => setZoom((z) => Math.min(2.2, +(z + 0.15).toFixed(2)))}
-              title="Zoom in"
               type="button"
+              title="Zoom in"
+              onClick={() =>
+                setZoom((z) =>
+                  Math.min(
+                    2.2,
+                    +(z + 0.15).toFixed(2)
+                  )
+                )
+              }
             >
               <Plus size={13} />
             </button>
           </div>
 
-          {/* Page Stepper */}
+          {/* Page navigation */}
           {pages.length > 1 && (
             <div className="dark-pill-btn page-pill">
               <button
-                onClick={() => setCurrentPageIndex((idx) => Math.max(0, idx - 1))}
-                disabled={currentPageIndex === 0}
-                title="Previous page"
                 type="button"
+                title="Previous page"
+                disabled={currentPageIndex === 0}
+                onClick={() =>
+                  setCurrentPageIndex((index) =>
+                    Math.max(0, index - 1)
+                  )
+                }
               >
                 <ChevronLeft size={14} />
               </button>
+
               <span className="page-text">
                 {activePage.page} / {pages.length}
               </span>
+
               <button
-                onClick={() => setCurrentPageIndex((idx) => Math.min(pages.length - 1, idx + 1))}
-                disabled={currentPageIndex === pages.length - 1}
-                title="Next page"
                 type="button"
+                title="Next page"
+                disabled={
+                  currentPageIndex === pages.length - 1
+                }
+                onClick={() =>
+                  setCurrentPageIndex((index) =>
+                    Math.min(
+                      pages.length - 1,
+                      index + 1
+                    )
+                  )
+                }
               >
                 <ChevronRight size={14} />
               </button>
@@ -108,15 +175,18 @@ export default function AnswerImageViewer({ pages, regions, selectedQuestionNumb
         </div>
       </div>
 
-      {/* Answer Sheet Image with Live Green Bounding Box */}
+      {/* Answer sheet */}
       <div className="sheet-scroll-viewport">
         <div
           className="sheet-transform-wrap"
-          style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}
+          style={{
+            transform: `scale(${zoom})`,
+            transformOrigin: 'top center',
+          }}
         >
           <PageCanvas
             page={activePage}
-            regions={regionsByPage[activePage.page] || []}
+            regions={activeRegions}
             questionNumber={selectedQuestionNumber}
           />
         </div>
@@ -134,8 +204,10 @@ function PageCanvas({
   regions: Region[];
   questionNumber: string;
 }) {
-  const highlightRef = useRef<HTMLDivElement>(null);
+  const highlightRef =
+    useRef<HTMLDivElement>(null);
 
+  // Scroll to selected answer region
   useEffect(() => {
     if (highlightRef.current) {
       highlightRef.current.scrollIntoView({
@@ -147,57 +219,114 @@ function PageCanvas({
 
   const src = page.image.startsWith('data:')
     ? page.image
-    : 'data:image/jpeg;base64,' + page.image;
+    : `data:image/jpeg;base64,${page.image}`;
 
-  const formattedQBadge = questionNumber.startsWith('Q') || questionNumber.startsWith('q')
-    ? questionNumber.toUpperCase()
-    : `Q${questionNumber}`;
+  const formattedQBadge =
+    questionNumber.startsWith('Q') ||
+    questionNumber.startsWith('q')
+      ? questionNumber.toUpperCase()
+      : `Q${questionNumber}`;
 
   return (
     <div className="figma-sheet-canvas-wrapper">
+
+      {/* Unanswered state */}
       {regions.length === 0 && (
         <div className="unanswered-sheet-banner">
           <AlertCircle size={15} />
-          <span>{formattedQBadge}: Question not attempted on this student's sheet</span>
+          <span>
+            {formattedQBadge}: Question not attempted
+            on this student's sheet
+          </span>
         </div>
       )}
 
-      <div className="sheet-image-box">
+      <div
+        className="sheet-image-box"
+        style={{
+          position: 'relative',
+          width: '100%',
+        }}
+      >
         <img
           src={src}
           alt={`Answer sheet page ${page.page}`}
           className="sheet-paper-img"
+          style={{
+            display: 'block',
+            width: '100%',
+            height: 'auto',
+          }}
         />
 
-        {/* Green Highlight Box with Percentage Positioning */}
-        {regions.map((region, idx) => {
-          // Normalize coordinate conversion from [0..1000] to percentage
-          const rawX = region.bbox.x > 100 ? region.bbox.x / 10 : region.bbox.x;
-          const rawY = region.bbox.y > 100 ? region.bbox.y / 10 : region.bbox.y;
-          const rawW = region.bbox.width > 100 ? region.bbox.width / 10 : region.bbox.width;
-          const rawH = region.bbox.height > 100 ? region.bbox.height / 10 : region.bbox.height;
+        {/* Exact answer regions */}
+        {regions.map((region, index) => {
+          /*
+           * Backend coordinates are normalized 0–1000.
+           *
+           * Convert every coordinate to CSS percentage:
+           *
+           * 118  -> 11.8%
+           * 450  -> 45.0%
+           * 677  -> 67.7%
+           * 62   -> 6.2%
+           */
+          const leftPercent =
+            (region.bbox.x / 1000) * 100;
 
-          const left = `${Math.max(0, Math.min(96, rawX)).toFixed(2)}%`;
-          const top = `${Math.max(0, Math.min(96, rawY)).toFixed(2)}%`;
-          const width = `${Math.max(4, Math.min(100 - rawX, rawW)).toFixed(2)}%`;
-          const height = `${Math.max(3, Math.min(100 - rawY, rawH)).toFixed(2)}%`;
+          const topPercent =
+            (region.bbox.y / 1000) * 100;
+
+          const widthPercent =
+            (region.bbox.width / 1000) * 100;
+
+          const heightPercent =
+            (region.bbox.height / 1000) * 100;
+
+          // Keep the box safely inside the page.
+          const left = Math.max(
+            0,
+            Math.min(100, leftPercent)
+          );
+
+          const top = Math.max(
+            0,
+            Math.min(100, topPercent)
+          );
+
+          const width = Math.max(
+            0.5,
+            Math.min(100 - left, widthPercent)
+          );
+
+          const height = Math.max(
+            0.5,
+            Math.min(100 - top, heightPercent)
+          );
 
           return (
             <div
-              key={idx}
-              ref={idx === 0 ? highlightRef : undefined}
+              key={`${region.page}-${index}`}
+              ref={
+                index === 0
+                  ? highlightRef
+                  : undefined
+              }
               className="figma-green-highlight-box"
               style={{
-                left,
-                top,
-                width,
-                height,
                 position: 'absolute',
-                display: 'block'
+                left: `${left}%`,
+                top: `${top}%`,
+                width: `${width}%`,
+                height: `${height}%`,
+                display: 'block',
+                pointerEvents: 'none',
+                boxSizing: 'border-box',
               }}
             >
-              {/* Green badge tab on top-left of box (e.g. Q2) */}
-              <div className="q-badge-tab">{formattedQBadge}</div>
+              <div className="q-badge-tab">
+                {formattedQBadge}
+              </div>
             </div>
           );
         })}

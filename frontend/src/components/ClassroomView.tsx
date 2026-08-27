@@ -1,248 +1,831 @@
-import { useState } from 'react';
+import {
+  useState,
+  useEffect
+} from 'react';
+
 import {
   Search,
   Plus,
   FileText,
   Eye,
-  GraduationCap
+  GraduationCap,
+  Users
 } from 'lucide-react';
-import type { TeacherUser } from '../types/user';
-import { AddStudentModal } from './Modals';
+
+import type {
+  TeacherUser
+} from '../types/user';
+
+import {
+  getStudentsBySchool,
+  addStudent,
+  createStudent,
+  type Student
+} from '../data/studentStore';
+
+import {
+  AddStudentModal
+} from './Modals';
+
 
 type ClassroomViewProps = {
   user: TeacherUser;
-  onEvaluateStudentSheet?: () => void;
+  assessmentHistory?: any[];
+  onEvaluateStudentSheet?: (
+    student?: Student
+  ) => void;
 };
 
-type Student = {
-  id: string;
-  name: string;
-  rollNo: string;
-  section: string;
-  attendance: string;
-  latestScore: number;
-  maxScore: number;
-  grade: 'A' | 'B' | 'C' | 'D';
-  learningGap: string;
-};
 
-const INITIAL_STUDENTS: Record<string, Student[]> = {
-  '10-a': [
-    { id: 'st-1', name: 'Aarav Sharma', rollNo: '10A-01', section: 'Section A', attendance: '96%', latestScore: 48, maxScore: 50, grade: 'A', learningGap: 'None detected — Exceptional derivation accuracy' },
-    { id: 'st-2', name: 'Ananya Sen', rollNo: '10A-02', section: 'Section A', attendance: '98%', latestScore: 47, maxScore: 50, grade: 'A', learningGap: 'Minor calculation error in Ohm Law' },
-    { id: 'st-3', name: 'Simran Kaur', rollNo: '10A-03', section: 'Section A', attendance: '88%', latestScore: 32, maxScore: 50, grade: 'C', learningGap: 'Misinterprets parallel vs series resistance' },
-    { id: 'st-4', name: 'Rohan Gupta', rollNo: '10A-04', section: 'Section A', attendance: '92%', latestScore: 41, maxScore: 50, grade: 'B', learningGap: 'Needs practice in circuit ray diagrams' },
-    { id: 'st-5', name: 'Pooja Verma', rollNo: '10A-05', section: 'Section A', attendance: '84%', latestScore: 28, maxScore: 50, grade: 'D', learningGap: 'Joule heating derivations incomplete' },
-    { id: 'st-6', name: 'Karan Mehra', rollNo: '10A-06', section: 'Section A', attendance: '94%', latestScore: 44, maxScore: 50, grade: 'A', learningGap: 'Good grasp of concepts' },
-  ],
-  '10-b': [
-    { id: 'st-7', name: 'Devika Nair', rollNo: '10B-01', section: 'Section B', attendance: '95%', latestScore: 46, maxScore: 50, grade: 'A', learningGap: 'Accurate explanations' },
-    { id: 'st-8', name: 'Vikram Malhotra', rollNo: '10B-02', section: 'Section B', attendance: '89%', latestScore: 36, maxScore: 50, grade: 'B', learningGap: 'Formula unit conversion issues' },
-    { id: 'st-9', name: 'Tanvi Joshi', rollNo: '10B-03', section: 'Section B', attendance: '91%', latestScore: 39, maxScore: 50, grade: 'B', learningGap: 'Needs more steps in 5-mark proofs' },
-    { id: 'st-10', name: 'Aditya Roy', rollNo: '10B-04', section: 'Section B', attendance: '82%', latestScore: 25, maxScore: 50, grade: 'D', learningGap: 'Requires targeted remediation in EMF' },
-  ]
-};
+export default function ClassroomView({
+  user,
+  onEvaluateStudentSheet
+}: ClassroomViewProps) {
 
-export default function ClassroomView({ user, onEvaluateStudentSheet }: ClassroomViewProps) {
-  const [studentsData, setStudentsData] = useState<Record<string, Student[]>>(INITIAL_STUDENTS);
-  const [activeSection, setActiveSection] = useState<'10-a' | '10-b'>('10-a');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [isAddStudentOpen, setIsAddStudentOpen] = useState(false);
+  // =========================================================
+  // STATE
+  // =========================================================
 
-  const students = studentsData[activeSection] || [];
-  const filteredStudents = students.filter(s =>
-    s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.rollNo.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const [students, setStudents] =
+    useState<Student[]>([]);
 
-  const handleAddNewStudent = (newSt: { name: string; rollNo: string; section: string }) => {
-    const secKey = newSt.section.includes('B') ? '10-b' : '10-a';
-    const created: Student = {
-      id: 'st-' + Date.now(),
-      name: newSt.name,
-      rollNo: newSt.rollNo,
-      section: newSt.section,
-      attendance: '100%',
-      latestScore: 42,
-      maxScore: 50,
-      grade: 'B',
-      learningGap: 'Newly enrolled — Baseline evaluation pending'
-    };
-    setStudentsData(prev => ({
-      ...prev,
-      [secKey]: [created, ...(prev[secKey] || [])]
-    }));
-    setActiveSection(secKey);
+  const [searchQuery, setSearchQuery] =
+    useState('');
+
+  const [selectedStudent, setSelectedStudent] =
+    useState<Student | null>(null);
+
+  const [isAddStudentOpen, setIsAddStudentOpen] =
+    useState(false);
+
+
+  // =========================================================
+  // LOAD STUDENTS WHEN SCHOOL CHANGES
+  // =========================================================
+
+  useEffect(() => {
+
+    const schoolStudents =
+      getStudentsBySchool(user.school.id);
+
+    setStudents(schoolStudents);
+
+    setSelectedStudent(null);
+
+    setSearchQuery('');
+
+  }, [user.school.id]);
+
+
+  // =========================================================
+  // SEARCH STUDENTS
+  // =========================================================
+
+  const filteredStudents =
+    students.filter((student) => {
+
+      const query =
+        searchQuery.toLowerCase();
+
+      return (
+        student.name
+          .toLowerCase()
+          .includes(query)
+
+        ||
+
+        student.rollNo
+          .toLowerCase()
+          .includes(query)
+
+        ||
+
+        student.section
+          .toLowerCase()
+          .includes(query)
+      );
+    });
+
+
+  // =========================================================
+  // ADD STUDENT
+  // =========================================================
+
+  const handleAddNewStudent = (
+    newStudent: {
+      name: string;
+      rollNo: string;
+      section: string;
+    }
+  ) => {
+
+    const student =
+      createStudent(
+        user.school,
+        newStudent
+      );
+
+    const updatedStudents =
+      addStudent(student);
+
+    setStudents(updatedStudents);
+
+    setIsAddStudentOpen(false);
   };
 
+
+  // =========================================================
+  // HELPERS
+  // =========================================================
+
+  const getGradeClass = (
+    grade: Student['grade']
+  ) => {
+
+    if (grade === 'A') {
+      return 'grade-badge-green';
+    }
+
+    if (grade === 'B') {
+      return 'grade-badge-yellow';
+    }
+
+    if (grade === 'C') {
+      return 'grade-badge-orange';
+    }
+
+    if (grade === 'D') {
+      return 'grade-badge-red';
+    }
+
+    return '';
+  };
+
+
+  const hasStudents =
+    students.length > 0;
+
+
+  // =========================================================
+  // UI
+  // =========================================================
+
   return (
+
     <div className="classroom-view-wrapper">
-      {/* Classroom Header Bar */}
+
+      {/* ===================================================
+          CLASSROOM HEADER
+      =================================================== */}
+
       <div className="classroom-header-bar">
+
         <div className="header-left-info">
-          <h2>My Classroom — {user.subject}</h2>
+
+          <h2>
+            My Classroom — {user.subject}
+          </h2>
+
           <span className="school-subhead">
-            <GraduationCap size={15} /> {user.school.name} ({user.school.location}) • Academic Year 2025–2026
+
+            <GraduationCap size={15} />
+
+            {user.school.name}
+
+            {' ('}
+            {user.school.location}
+            {')'}
+
+            {' • '}
+
+            Academic Year 2025–2026
+
           </span>
+
         </div>
+
 
         <div className="header-actions-row">
-          <button className="primary-action-btn" onClick={() => setIsAddStudentOpen(true)} type="button">
-            <Plus size={16} /> Add Student
+
+          <button
+            className="primary-action-btn"
+            onClick={() =>
+              setIsAddStudentOpen(true)
+            }
+            type="button"
+          >
+
+            <Plus size={16} />
+
+            Add Student
+
           </button>
+
         </div>
+
       </div>
 
-      {/* Section Filter Pills */}
+
+      {/* ===================================================
+          SCHOOL / STUDENT INFO BAR
+      =================================================== */}
+
       <div className="classroom-controls-bar">
+
         <div className="section-tabs-group">
-          <button
-            className={'section-tab-btn ' + (activeSection === '10-a' ? 'active' : '')}
-            onClick={() => setActiveSection('10-a')}
-            type="button"
-          >
-            Class 10 — Section A (28 Students)
-          </button>
-          <button
-            className={'section-tab-btn ' + (activeSection === '10-b' ? 'active' : '')}
-            onClick={() => setActiveSection('10-b')}
-            type="button"
-          >
-            Class 10 — Section B (26 Students)
-          </button>
+
+          <div className="section-tab-btn active">
+
+            <Users size={15} />
+
+            {students.length}
+
+            {' '}
+
+            Student
+            {students.length !== 1 ? 's' : ''}
+
+            {' • '}
+
+            {user.school.name}
+
+          </div>
+
         </div>
+
 
         <div className="classroom-search-box">
-          <Search size={16} className="search-icon" />
+
+          <Search
+            size={16}
+            className="search-icon"
+          />
+
           <input
             type="text"
-            placeholder="Search student by name or roll no..."
+            placeholder="Search student by name, roll no or section..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) =>
+              setSearchQuery(e.target.value)
+            }
           />
+
         </div>
+
       </div>
 
-      {/* Student Roster Table */}
-      <div className="figma-dash-card student-roster-card">
-        <div className="table-responsive-wrap">
-          <table className="classroom-table">
-            <thead>
-              <tr>
-                <th>Roll No</th>
-                <th>Student Name</th>
-                <th>Section</th>
-                <th>Attendance</th>
-                <th>Latest Exam Score</th>
-                <th>Grade</th>
-                <th>Identified Learning Gap</th>
-                <th className="text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredStudents.map((student) => {
-                const gradeClass =
-                  student.grade === 'A' ? 'grade-badge-green' :
-                  student.grade === 'B' ? 'grade-badge-yellow' :
-                  student.grade === 'C' ? 'grade-badge-orange' : 'grade-badge-red';
 
-                return (
-                  <tr key={student.id} className="student-row">
-                    <td className="roll-cell"><strong>{student.rollNo}</strong></td>
-                    <td className="name-cell">
-                      <div className="student-avatar-row">
-                        <div className="student-mini-avatar">{student.name.charAt(0)}</div>
-                        <span>{student.name}</span>
-                      </div>
+      {/* ===================================================
+          EMPTY STATE
+      =================================================== */}
+
+      {!hasStudents ? (
+
+        <div className="figma-dash-card student-roster-card">
+
+          <div
+            style={{
+              padding: '70px 30px',
+              textAlign: 'center'
+            }}
+          >
+
+            <Users
+              size={48}
+              style={{
+                marginBottom: '16px',
+                opacity: 0.5
+              }}
+            />
+
+            <h2>
+              No Students Registered Yet
+            </h2>
+
+            <p
+              style={{
+                marginTop: '8px',
+                opacity: 0.7
+              }}
+            >
+
+              {user.school.name}
+              {' '}
+              currently has no students registered in VEDA.
+
+            </p>
+
+            <button
+              className="primary-action-btn"
+              style={{
+                marginTop: '22px'
+              }}
+              onClick={() =>
+                setIsAddStudentOpen(true)
+              }
+              type="button"
+            >
+
+              <Plus size={16} />
+
+              Register First Student
+
+            </button>
+
+          </div>
+
+        </div>
+
+      ) : (
+
+        /* ===================================================
+            STUDENT TABLE
+        =================================================== */
+
+        <div className="figma-dash-card student-roster-card">
+
+          <div className="table-responsive-wrap">
+
+            <table className="classroom-table">
+
+              <thead>
+
+                <tr>
+
+                  <th>
+                    Roll No
+                  </th>
+
+                  <th>
+                    Student Name
+                  </th>
+
+                  <th>
+                    Section
+                  </th>
+
+                  <th>
+                    Attendance
+                  </th>
+
+                  <th>
+                    Latest Exam Score
+                  </th>
+
+                  <th>
+                    Grade
+                  </th>
+
+                  <th>
+                    Identified Learning Gap
+                  </th>
+
+                  <th className="text-right">
+                    Actions
+                  </th>
+
+                </tr>
+
+              </thead>
+
+
+              <tbody>
+
+                {filteredStudents.length === 0 ? (
+
+                  <tr>
+
+                    <td
+                      colSpan={8}
+                      style={{
+                        textAlign: 'center',
+                        padding: '40px'
+                      }}
+                    >
+
+                      No students found.
+
                     </td>
-                    <td>{student.section}</td>
-                    <td>{student.attendance}</td>
-                    <td>
-                      <strong>{student.latestScore}</strong> / {student.maxScore}
-                      <span className="pct-muted"> ({Math.round((student.latestScore / student.maxScore) * 100)}%)</span>
-                    </td>
-                    <td>
-                      <span className={'grade-pill ' + gradeClass}>{student.grade}</span>
-                    </td>
-                    <td className="gap-cell">
-                      <span className="gap-text">{student.learningGap}</span>
-                    </td>
-                    <td className="text-right">
-                      <button
-                        className="view-sheet-btn"
-                        onClick={() => setSelectedStudent(student)}
-                        type="button"
-                        title="View Student Answer Sheet Archive"
-                      >
-                        <Eye size={14} /> View
-                      </button>
-                    </td>
+
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
-      {/* Student Detail Modal */}
+                ) : (
+
+                  filteredStudents.map((student) => {
+
+                    const gradeClass =
+                      getGradeClass(student.grade);
+
+                    const hasAssessment =
+                      student.maxScore > 0;
+
+
+                    return (
+
+                      <tr
+                        key={student.id}
+                        className="student-row"
+                      >
+
+                        {/* Roll Number */}
+
+                        <td className="roll-cell">
+
+                          <strong>
+                            {student.rollNo}
+                          </strong>
+
+                        </td>
+
+
+                        {/* Student Name */}
+
+                        <td className="name-cell">
+
+                          <div className="student-avatar-row">
+
+                            <div className="student-mini-avatar">
+
+                              {student.name
+                                .charAt(0)
+                                .toUpperCase()}
+
+                            </div>
+
+                            <span>
+                              {student.name}
+                            </span>
+
+                          </div>
+
+                        </td>
+
+
+                        {/* Section */}
+
+                        <td>
+
+                          {student.section}
+
+                        </td>
+
+
+                        {/* Attendance */}
+
+                        <td>
+
+                          {student.attendance}
+
+                        </td>
+
+
+                        {/* Score */}
+
+                        <td>
+
+                          {hasAssessment ? (
+
+                            <>
+
+                              <strong>
+                                {student.latestScore}
+                              </strong>
+
+                              {' / '}
+
+                              {student.maxScore}
+
+                              <span className="pct-muted">
+
+                                {' ('}
+
+                                {Math.round(
+                                  (
+                                    student.latestScore /
+                                    student.maxScore
+                                  ) * 100
+                                )}
+
+                                {'%)'}
+
+                              </span>
+
+                            </>
+
+                          ) : (
+
+                            <span className="pct-muted">
+
+                              Not evaluated
+
+                            </span>
+
+                          )}
+
+                        </td>
+
+
+                        {/* Grade */}
+
+                        <td>
+
+                          {student.grade !== '-' ? (
+
+                            <span
+                              className={
+                                'grade-pill ' +
+                                gradeClass
+                              }
+                            >
+
+                              {student.grade}
+
+                            </span>
+
+                          ) : (
+
+                            <span className="pct-muted">
+
+                              -
+
+                            </span>
+
+                          )}
+
+                        </td>
+
+
+                        {/* Learning Gap */}
+
+                        <td className="gap-cell">
+
+                          <span className="gap-text">
+
+                            {student.learningGap}
+
+                          </span>
+
+                        </td>
+
+
+                        {/* Actions */}
+
+                        <td className="text-right">
+
+                          <button
+                            className="view-sheet-btn"
+                            onClick={() =>
+                              setSelectedStudent(student)
+                            }
+                            type="button"
+                            title="View Student Record"
+                          >
+
+                            <Eye size={14} />
+
+                            View
+
+                          </button>
+
+                        </td>
+
+                      </tr>
+
+                    );
+
+                  })
+
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </div>
+
+      )}
+
+
+      {/* ===================================================
+          STUDENT DETAIL MODAL
+      =================================================== */}
+
       {selectedStudent && (
-        <div className="modal-overlay" onClick={() => setSelectedStudent(null)}>
-          <div className="modal-card student-archive-modal" onClick={(e) => e.stopPropagation()}>
+
+        <div
+          className="modal-overlay"
+          onClick={() =>
+            setSelectedStudent(null)
+          }
+        >
+
+          <div
+            className="modal-card student-archive-modal"
+            onClick={(e) =>
+              e.stopPropagation()
+            }
+          >
+
+            {/* HEADER */}
+
             <div className="modal-header">
+
               <div>
-                <strong>{selectedStudent.name} ({selectedStudent.rollNo})</strong>
-                <span className="modal-sub-label">Class 10 Science • Answer Sheet &amp; Evaluation Record</span>
+
+                <strong>
+
+                  {selectedStudent.name}
+
+                  {' ('}
+
+                  {selectedStudent.rollNo}
+
+                  {')'}
+
+                </strong>
+
+                <span className="modal-sub-label">
+
+                  {selectedStudent.section}
+
+                  {' • '}
+
+                  Student Evaluation Record
+
+                </span>
+
               </div>
-              <button className="modal-close-btn" onClick={() => setSelectedStudent(null)} type="button">×</button>
+
+
+              <button
+                className="modal-close-btn"
+                onClick={() =>
+                  setSelectedStudent(null)
+                }
+                type="button"
+              >
+
+                ×
+
+              </button>
+
             </div>
+
+
+            {/* BODY */}
 
             <div className="modal-body">
+
               <div className="student-stats-row">
+
+
+                {/* SCORE */}
+
                 <div className="stat-box">
-                  <span className="stat-label">Score</span>
-                  <strong>{selectedStudent.latestScore}/{selectedStudent.maxScore}</strong>
+
+                  <span className="stat-label">
+
+                    Score
+
+                  </span>
+
+                  <strong>
+
+                    {selectedStudent.maxScore > 0
+                      ? `${selectedStudent.latestScore}/${selectedStudent.maxScore}`
+                      : 'Not evaluated'
+                    }
+
+                  </strong>
+
                 </div>
+
+
+                {/* GRADE */}
+
                 <div className="stat-box">
-                  <span className="stat-label">Grade</span>
-                  <strong>{selectedStudent.grade}</strong>
+
+                  <span className="stat-label">
+
+                    Grade
+
+                  </span>
+
+                  <strong>
+
+                    {selectedStudent.grade}
+
+                  </strong>
+
                 </div>
+
+
+                {/* ATTENDANCE */}
+
                 <div className="stat-box">
-                  <span className="stat-label">Attendance</span>
-                  <strong>{selectedStudent.attendance}</strong>
+
+                  <span className="stat-label">
+
+                    Attendance
+
+                  </span>
+
+                  <strong>
+
+                    {selectedStudent.attendance}
+
+                  </strong>
+
                 </div>
+
               </div>
+
+
+              {/* LEARNING GAP */}
 
               <div className="archive-feedback-box">
-                <div className="feedback-heading">AI Diagnostic Note:</div>
-                <p>{selectedStudent.learningGap}</p>
+
+                <div className="feedback-heading">
+
+                  Student Learning Status:
+
+                </div>
+
+                <p>
+
+                  {selectedStudent.learningGap}
+
+                </p>
+
               </div>
+
             </div>
 
+
+            {/* FOOTER */}
+
             <div className="modal-footer">
+
               <button
                 className="primary-action-btn"
                 onClick={() => {
+
+                  const student =
+                    selectedStudent;
+
                   setSelectedStudent(null);
-                  if (onEvaluateStudentSheet) onEvaluateStudentSheet();
+
+                  if (
+                    onEvaluateStudentSheet
+                  ) {
+
+                    onEvaluateStudentSheet(
+                      student
+                    );
+
+                  }
+
                 }}
                 type="button"
               >
-                <FileText size={16} /> Open in Assessment Analyzer
+
+                <FileText size={16} />
+
+                Evaluate Answer Sheet
+
               </button>
+
             </div>
+
           </div>
+
         </div>
+
       )}
 
-      {/* Add Student Modal */}
+
+      {/* ===================================================
+          ADD STUDENT MODAL
+      =================================================== */}
+
       {isAddStudentOpen && (
+
         <AddStudentModal
-          onClose={() => setIsAddStudentOpen(false)}
+
+          onClose={() =>
+            setIsAddStudentOpen(false)
+          }
+
           onAdd={handleAddNewStudent}
+
         />
+
       )}
+
     </div>
+
   );
+
 }
