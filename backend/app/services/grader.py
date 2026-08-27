@@ -3,7 +3,7 @@ import re
 from time import sleep
 from typing import Any, Dict, List, Optional
 
-from app.services.groq_client import client, MODEL_NAME
+from app.services.groq_client import call_text
 
 
 # ============================================================
@@ -79,7 +79,6 @@ def clean_json_text(text: str) -> str:
 
     text = str(text).strip()
 
-    # Remove <think>...</think>
     text = re.sub(
         r"<think>[\s\S]*?</think>",
         "",
@@ -87,7 +86,6 @@ def clean_json_text(text: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
 
-    # Remove markdown code fences
     match = re.search(
         r"```(?:json)?\s*([\s\S]*?)\s*```",
         text,
@@ -97,7 +95,6 @@ def clean_json_text(text: str) -> str:
     if match:
         text = match.group(1).strip()
 
-    # Extract JSON object
     first = text.find("{")
     last = text.rfind("}")
 
@@ -167,13 +164,11 @@ def sanitize_grade(
         0.0,
     )
 
-    # Never allow negative marks
     awarded = max(
         0.0,
         awarded,
     )
 
-    # Never exceed maximum marks
     awarded = min(
         float(max_marks),
         awarded,
@@ -208,7 +203,6 @@ def sanitize_grade(
         feedback
     ).strip()
 
-    # Automatically normalize status according to score
     if awarded == 0:
 
         if status not in {
@@ -262,8 +256,6 @@ def grade_single_question(
 ) -> Dict[str, Any]:
     """
     Grade one question independently.
-
-    One question per Groq request prevents large TPM requests.
     """
 
     question_id = (
@@ -371,27 +363,22 @@ Example:
                 f"attempt {attempt + 1}/3..."
             )
 
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
+            # ====================================================
+            # CENTRALIZED GROQ TEXT CALL
+            # ====================================================
 
+            response = call_text(
                 messages=[
                     {
                         "role": "user",
                         "content": user_prompt,
                     }
                 ],
-
                 temperature=0,
-
-                max_completion_tokens=500,
-
+                max_tokens=500,
                 response_format={
                     "type": "json_object"
                 },
-
-                # Qwen reasoning models work better when
-                # reasoning output is hidden for JSON tasks.
-                reasoning_format="hidden",
             )
 
             raw = (
@@ -472,7 +459,7 @@ Example:
             )
 
             # ------------------------------------------------
-            # Do NOT retry hard API limits
+            # DO NOT RETRY HARD API ERRORS
             # ------------------------------------------------
 
             if (
@@ -494,7 +481,7 @@ Example:
                 raise error
 
             # ------------------------------------------------
-            # Retry temporary failures
+            # RETRY TEMPORARY ERRORS
             # ------------------------------------------------
 
             if attempt < 2:
@@ -531,9 +518,6 @@ def combine_answer_text(
     """
     Combine multiple answer objects belonging
     to the same question.
-
-    Useful when an answer continues onto
-    another page.
     """
 
     if not answers:
@@ -693,10 +677,6 @@ def grade_assessment(
             f"{len(matching_answers)}"
         )
 
-        # ====================================================
-        # GRADE
-        # ====================================================
-
         grade = grade_single_question(
             question=question,
             answer_text=answer_text,
@@ -715,7 +695,6 @@ def grade_assessment(
             f"({grade['status']})"
         )
 
-        # Small delay between requests
         sleep(0.5)
 
     # ========================================================
@@ -785,10 +764,6 @@ def grade_answers(
         answers
     )
     """
-
-    # ========================================================
-    # EMPTY INPUT
-    # ========================================================
 
     if not matches_or_questions:
         return []
@@ -911,7 +886,7 @@ def grade_answers(
                 ):
 
                     print(
-                        f"\n----------------------------------------"
+                        "\n----------------------------------------"
                     )
 
                     print(
@@ -941,7 +916,7 @@ def grade_answers(
                 # =================================================
 
                 print(
-                    f"\n----------------------------------------"
+                    "\n----------------------------------------"
                 )
 
                 print(
