@@ -66,7 +66,7 @@ print(
 def call_vision(
     messages,
     temperature: float = 0,
-    max_tokens: int = 2500,
+    max_tokens: int = 8192,
     response_format=None,
 ):
     """
@@ -91,6 +91,10 @@ def call_vision(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # Disable thinking mode so the model outputs
+        # JSON directly without a long <think> block
+        # that exhausts the token budget.
+        "reasoning_effort": "none",
     }
 
     if response_format:
