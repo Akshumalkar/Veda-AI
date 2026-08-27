@@ -144,6 +144,7 @@ def call_text(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "reasoning_effort": "none",
     }
 
     if response_format:
