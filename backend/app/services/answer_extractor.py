@@ -603,7 +603,7 @@ def extract_answers_from_page(
                     }
                 ],
                 temperature=0,
-                max_tokens=8192,
+                max_tokens=3500,
             )
 
             raw = (

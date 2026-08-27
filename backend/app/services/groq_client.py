@@ -66,7 +66,7 @@ print(
 def call_vision(
     messages,
     temperature: float = 0,
-    max_tokens: int = 8192,
+    max_tokens: int = 3500,
     response_format=None,
 ):
     """
