@@ -25,13 +25,12 @@ IMPORTANT:
 - A student may leave questions unanswered.
 - Extract only content actually visible in the student's answer sheet.
 
-==================================================
 QUESTION NUMBER DETECTION
-==================================================
+-------------------------
 
 Detect question numbers written by the student.
 
-Valid examples:
+Examples:
 
 Q1
 Q.1
@@ -88,9 +87,8 @@ If there is clearly an answer but NO visible question number:
 
 NEVER guess the question number.
 
-==================================================
 ANSWER SEGMENTATION
-==================================================
+-------------------
 
 Create ONE answer object for each distinct answer.
 
@@ -112,12 +110,11 @@ DO NOT split an answer because of:
 - headings
 - page breaks
 
-If the answer continues on another page, keep it as ONE answer
+If an answer continues onto another page, keep it as ONE answer
 and add another region to the regions array.
 
-==================================================
 ANSWER TEXT
-==================================================
+-----------
 
 Transcribe what the student actually wrote.
 
@@ -143,9 +140,8 @@ Do NOT correct spelling unless completely unreadable.
 
 Do NOT include question text unless the student actually wrote it.
 
-==================================================
 DIAGRAMS
-==================================================
+--------
 
 If the student drew a diagram:
 
@@ -155,9 +151,8 @@ If the student drew a diagram:
 - do NOT invent labels
 - do NOT describe a diagram that does not exist
 
-==================================================
 FORMULAS AND CALCULATIONS
-==================================================
+-------------------------
 
 Extract formulas and numerical calculations exactly as visible.
 
@@ -173,9 +168,8 @@ M = mass / volume
 
 Do not change mathematical meaning.
 
-==================================================
 BBOX
-==================================================
+----
 
 For EVERY answer identify ALL physical regions belonging to that answer.
 
@@ -185,15 +179,6 @@ Coordinate system:
 
 x = left to right
 y = top to bottom
-
-Format:
-
-{
-    "x": integer,
-    "y": integer,
-    "width": integer,
-    "height": integer
-}
 
 The bbox must cover the actual handwritten content.
 
@@ -210,55 +195,24 @@ Include:
 
 when they belong to that answer.
 
-If the answer continues onto another page, create another region.
-
-==================================================
 PAGE NUMBER
-==================================================
+-----------
 
 Use the actual page number supplied with the image.
 
 Page numbers start at 1.
 
-==================================================
 ANSWER ID
-==================================================
+---------
 
 Create sequential IDs:
 
 a1
 a2
 a3
-a4
 
-==================================================
-JSON STRICTNESS
-==================================================
-
-Your response will be parsed directly by Python json.loads().
-
-Therefore:
-
-- Return ONLY JSON.
-- Start the response with {.
-- End the response with }.
-- NEVER use markdown.
-- NEVER use ```json.
-- NEVER use ``` blocks.
-- NEVER add explanations before or after JSON.
-- NEVER add comments inside JSON.
-- Use double quotes for all JSON keys and string values.
-- Escape double quotes inside text correctly.
-- Do not leave trailing commas.
-- Make sure every { has a matching }.
-- Make sure every [ has a matching ].
-- Make sure every JSON string is properly closed.
-- Do not output incomplete JSON.
-- Keep the JSON compact and simple.
-
-==================================================
 ACCURACY RULES
-==================================================
+--------------
 
 1. Extract EVERY visible answer.
 2. Preserve student's answer-sheet order.
@@ -275,35 +229,36 @@ ACCURACY RULES
 13. Do not return markdown.
 14. Do not return explanations.
 
-==================================================
 OUTPUT FORMAT
-==================================================
+-------------
+
+Return exactly:
 
 {
-    "answers": [
+  "answers": [
+    {
+      "answer_id": "a1",
+      "question_number": "1",
+      "text": "Student's answer text",
+      "regions": [
         {
-            "answer_id": "a1",
-            "question_number": "1",
-            "text": "Student's answer text",
-            "regions": [
-                {
-                    "page": 1,
-                    "bbox": {
-                        "x": 80,
-                        "y": 150,
-                        "width": 840,
-                        "height": 320
-                    }
-                }
-            ]
+          "page": 1,
+          "bbox": {
+            "x": 80,
+            "y": 150,
+            "width": 840,
+            "height": 320
+          }
         }
-    ]
+      ]
+    }
+  ]
 }
 
 If no answers are detected:
 
 {
-    "answers": []
+  "answers": []
 }
 """
 
@@ -316,9 +271,9 @@ def clean_json_text(text: str) -> str:
     if not text:
         return ""
 
-    text = text.strip()
+    text = str(text).strip()
 
-    # Remove reasoning/think tags.
+    # Remove <think>...</think>
     text = re.sub(
         r"<think>[\s\S]*?</think>",
         "",
@@ -326,8 +281,7 @@ def clean_json_text(text: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
 
-    # Remove markdown code fences if the model ignores
-    # the instruction and returns them.
+    # Remove markdown fences
     match = re.search(
         r"```(?:json)?\s*([\s\S]*?)\s*```",
         text,
@@ -337,7 +291,7 @@ def clean_json_text(text: str) -> str:
     if match:
         text = match.group(1).strip()
 
-    # Remove accidental text before/after JSON.
+    # Remove accidental text before/after JSON
     first = text.find("{")
     last = text.rfind("}")
 
@@ -365,47 +319,23 @@ def parse_json_response(text: str) -> Dict[str, Any]:
 
     if not cleaned:
         raise ValueError(
-            "Groq returned empty JSON after cleaning."
+            "Groq returned an empty JSON response."
         )
 
     try:
         result = json.loads(cleaned)
 
-        if not isinstance(result, dict):
-            raise ValueError(
-                "Groq JSON response is not an object."
-            )
-
-        return result
-
     except json.JSONDecodeError as error:
-
-        # Print a small diagnostic around the error.
-        error_position = error.pos
-
-        start = max(
-            0,
-            error_position - 150,
-        )
-
-        end = min(
-            len(cleaned),
-            error_position + 150,
-        )
-
-        context = cleaned[start:end]
-
-        print(
-            "\n========== JSON ERROR CONTEXT =========="
-        )
-        print(context)
-        print(
-            "========================================\n"
-        )
-
         raise ValueError(
             f"Invalid JSON returned by Groq: {error}"
         ) from error
+
+    if not isinstance(result, dict):
+        raise ValueError(
+            "Groq JSON response is not an object."
+        )
+
+    return result
 
 
 def image_to_data_url(
@@ -413,7 +343,7 @@ def image_to_data_url(
     mime_type: str = "image/png",
 ) -> str:
     """
-    Convert image bytes into a base64 data URL.
+    Convert image bytes into base64 data URL.
     """
 
     encoded = base64.b64encode(
@@ -428,16 +358,6 @@ def normalize_answer_number(
 ):
     """
     Normalize handwritten question numbers.
-
-    Examples:
-
-    Q1       -> 1
-    Q.1      -> 1
-    1.       -> 1
-    Q1(a)    -> 1(a)
-    1-a      -> 1(a)
-    1.1      -> 1(a)
-    1(ii)    -> 1(b)
     """
 
     if value is None:
@@ -482,15 +402,16 @@ def normalize_answer_number(
     )
 
     if match:
-
         number = match.group(1)
 
-        sub_number = int(
-            match.group(2)
-        )
+        try:
+            sub_number = int(
+                match.group(2)
+            )
+        except ValueError:
+            sub_number = 0
 
         if 1 <= sub_number <= 26:
-
             sub = chr(
                 ord("a")
                 + sub_number
@@ -535,7 +456,7 @@ def sanitize_bbox(
     bbox: Dict[str, Any],
 ) -> Dict[str, int]:
     """
-    Keep bbox values inside 0-1000 normalized coordinates.
+    Keep bbox values inside 0-1000.
     """
 
     if not isinstance(
@@ -558,7 +479,6 @@ def sanitize_bbox(
             return int(
                 float(value)
             )
-
         except (
             TypeError,
             ValueError,
@@ -660,13 +580,6 @@ def sanitize_result(
         ):
             continue
 
-        answer_id = answer.get(
-            "answer_id"
-        )
-
-        if not answer_id:
-            answer_id = f"a{index}"
-
         question_number = (
             normalize_answer_number(
                 answer.get(
@@ -714,10 +627,7 @@ def sanitize_result(
             )
 
             try:
-                page = int(
-                    page
-                )
-
+                page = int(page)
             except (
                 TypeError,
                 ValueError,
@@ -750,9 +660,7 @@ def sanitize_result(
 
         answers.append(
             {
-                "answer_id": str(
-                    answer_id
-                ),
+                "answer_id": f"a{index}",
                 "question_number": (
                     question_number
                 ),
@@ -761,12 +669,11 @@ def sanitize_result(
             }
         )
 
-    # Always rebuild sequential IDs.
+    # Rebuild stable sequential IDs.
     for index, answer in enumerate(
         answers,
         start=1,
     ):
-
         answer["answer_id"] = (
             f"a{index}"
         )
@@ -776,6 +683,24 @@ def sanitize_result(
     }
 
 
+def is_rate_limit_error(
+    error: Exception,
+) -> bool:
+    """
+    Detect Groq 429/rate-limit errors.
+    """
+
+    message = str(error).lower()
+
+    return (
+        "429" in message
+        or "rate_limit" in message
+        or "rate limit" in message
+        or "tokens per day" in message
+        or "tokens per minute" in message
+    )
+
+
 def extract_answers_from_page(
     image_bytes: bytes,
     page_number: int,
@@ -783,6 +708,10 @@ def extract_answers_from_page(
 ):
     """
     Extract handwritten answers from ONE page.
+
+    IMPORTANT:
+    This function stops immediately on Groq rate limits.
+    It does not waste additional API calls.
     """
 
     page_prompt = (
@@ -794,7 +723,9 @@ def extract_answers_from_page(
         + f"Every region detected on this image "
         f"MUST use page={page_number}.\n"
         + "Do not use another page number.\n"
-        + "Coordinates MUST be normalized from 0 to 1000."
+        + "Coordinates MUST be normalized from 0 to 1000.\n"
+        + "IMPORTANT: Return ONLY valid JSON. "
+        + "Do not return markdown or explanations."
     )
 
     message_content = [
@@ -815,40 +746,27 @@ def extract_answers_from_page(
 
     last_error = None
 
-    # IMPORTANT:
-    # We keep retries low because Render/Groq has token
-    # limits. A retry of a large vision request consumes
-    # tokens again.
-    max_attempts = 2
-
-    for attempt in range(
-        max_attempts
-    ):
+    for attempt in range(3):
 
         try:
 
             print(
                 "\n========== ANSWER EXTRACTION "
                 f"PAGE {page_number} "
-                f"ATTEMPT {attempt + 1}/{max_attempts} =========="
+                f"ATTEMPT {attempt + 1}/3 =========="
             )
 
             response = (
                 client.chat.completions.create(
                     model=MODEL_NAME,
-
                     messages=[
                         {
                             "role": "user",
                             "content": message_content,
                         }
                     ],
-
                     temperature=0,
-
-                    # Reduced from 4096.
-                    # This helps reduce Groq TPD consumption.
-                    max_tokens=2048,
+                    max_tokens=4096,
                 )
             )
 
@@ -860,7 +778,7 @@ def extract_answers_from_page(
             )
 
             print(
-                "\n========== GROQ ANSWER PAGE "
+                "\n========== RAW GROQ ANSWER PAGE "
                 f"{page_number} =========="
             )
 
@@ -869,11 +787,6 @@ def extract_answers_from_page(
             print(
                 "========================================\n"
             )
-
-            if not raw:
-                raise ValueError(
-                    "Groq returned an empty response."
-                )
 
             result = parse_json_response(
                 raw
@@ -894,13 +807,15 @@ def extract_answers_from_page(
                 f"{error}"
             )
 
-            # Retry malformed JSON only once.
-            if attempt < max_attempts - 1:
+            # Retry malformed JSON only.
+            if attempt < 2:
 
-                wait_seconds = 2
+                wait_seconds = (
+                    attempt + 1
+                ) * 2
 
                 print(
-                    "Retrying answer extraction "
+                    "Retrying JSON parsing/model call "
                     f"in {wait_seconds} seconds..."
                 )
 
@@ -919,22 +834,14 @@ def extract_answers_from_page(
             print(
                 "Groq answer extraction "
                 f"page {page_number} "
-                f"attempt {attempt + 1}/{max_attempts} "
-                f"failed: {error_message}"
+                f"attempt {attempt + 1}/3 failed: "
+                f"{error_message}"
             )
 
-            # ==========================================
-            # RATE LIMIT
-            # ==========================================
-
-            if (
-                "429" in error_message
-                or "rate_limit"
-                in error_message.lower()
-                or "rate limit"
-                in error_message.lower()
-                or "tokens per day"
-                in error_message.lower()
+            # IMPORTANT:
+            # Never waste calls after a 429.
+            if is_rate_limit_error(
+                error
             ):
 
                 print(
@@ -944,13 +851,12 @@ def extract_answers_from_page(
 
                 raise error
 
-            # ==========================================
-            # OTHER TEMPORARY ERRORS
-            # ==========================================
+            # Retry temporary failures.
+            if attempt < 2:
 
-            if attempt < max_attempts - 1:
-
-                wait_seconds = 2
+                wait_seconds = (
+                    attempt + 1
+                ) * 3
 
                 print(
                     "Retrying answer extraction "
@@ -965,7 +871,7 @@ def extract_answers_from_page(
         raise last_error
 
     raise RuntimeError(
-        f"Answer extraction failed "
+        "Answer extraction failed "
         f"for page {page_number}."
     )
 
