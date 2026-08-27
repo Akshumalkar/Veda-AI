@@ -1,35 +1,12 @@
 import base64
-import io
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
-
-from PIL import Image
+from typing import Any, Dict, List
 
 from app.services.groq_client import (
-    client,
-    MODEL_NAME,
-    MAX_COMPLETION_TOKENS,
+    call_vision,
 )
-
 from app.utils.pdf import pdf_to_images
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-# Maximum image dimension sent to Groq.
-#
-# The original PDF render may be unnecessarily large.
-# Resizing reduces request size while keeping enough
-# resolution for examination-paper OCR.
-#
-# Groq currently supports up to 20 MB per image request,
-# but smaller images are preferable for token efficiency.
-# ============================================================
-
-MAX_IMAGE_DIMENSION = 1800
 
 
 # ============================================================
@@ -41,23 +18,24 @@ You are an examination question extraction system.
 
 Look carefully at the supplied examination paper image.
 
-Extract ONLY the actual examination questions visible
-on the page.
+Extract EVERY visible examination question.
 
-Return ONLY a JSON object using exactly this structure:
+Return ONLY valid JSON.
+
+The response MUST follow exactly this structure:
 
 {
   "questions": [
     {
       "id": "q1",
       "number": "1",
-      "text": "Complete question text",
+      "text": "complete question text",
       "page": 1,
       "max_marks": 5,
       "bbox": {
-        "x": 0,
-        "y": 0,
-        "width": 1000,
+        "x": 100,
+        "y": 100,
+        "width": 800,
         "height": 100
       }
     }
@@ -73,6 +51,7 @@ IMPORTANT RULES:
 3. Treat subquestions separately.
 
    Examples:
+
    1(a)
    1(b)
    2(a)
@@ -80,37 +59,51 @@ IMPORTANT RULES:
 
 4. Preserve the complete visible question text.
 
-5. Do NOT summarize questions.
+5. Do NOT summarize the question.
 
-6. Do NOT invent missing text.
+6. Do NOT rewrite the question.
 
-7. Ignore:
+7. Do NOT invent missing words.
+
+8. Ignore:
    - college name
    - university name
-   - subject name
    - examination name
-   - instructions
-   - student information
-   - registration number
+   - subject name
    - date
-   - time
-   - page header
-   - page footer
+   - student information
+   - roll number
    - general instructions
+   - page headers
+   - page footers
 
-8. If marks are visible beside a question,
-   extract the marks.
+9. Extract only actual examination questions.
 
-9. If marks are not visible,
-   use 5.
+10. Preserve mathematical expressions as accurately as possible.
 
-10. Coordinates must be normalized from 0 to 1000.
+11. Preserve chemical formulas and equations.
 
-11. bbox should cover the complete question.
+12. Preserve programming/code-related text when visible.
 
-12. The page field must contain the supplied page number.
+13. If marks are printed beside a question, use those marks.
 
-13. Every question must contain:
+14. If marks are not visible, use 5.
+
+15. Coordinates must be normalized from 0 to 1000.
+
+16. bbox.x and bbox.y represent the top-left corner.
+
+17. bbox.width and bbox.height represent the question's region.
+
+18. The bounding box should cover the COMPLETE question text.
+
+19. Do not use negative coordinates.
+
+20. Do not return coordinates outside 0-1000.
+
+21. Use the supplied page number.
+
+22. Every extracted question MUST contain:
    - id
    - number
    - text
@@ -118,14 +111,13 @@ IMPORTANT RULES:
    - max_marks
    - bbox
 
-14. Return JSON only.
+23. Return valid JSON only.
 
-15. Do not use markdown.
+24. Do not use markdown.
 
-16. Do not write explanations outside JSON.
+25. Do not include explanations outside JSON.
 
-17. If no examination questions are visible,
-    return:
+26. If no examination questions are visible, return:
 
 {
   "questions": []
@@ -134,126 +126,7 @@ IMPORTANT RULES:
 
 
 # ============================================================
-# IMAGE RESIZING
-# ============================================================
-
-def prepare_image_for_groq(
-    image_bytes: bytes,
-    mime_type: str = "image/png",
-) -> Tuple[bytes, str]:
-    """
-    Resize/compress the image before sending it to Groq.
-
-    This reduces unnecessary image payload size and helps
-    reduce token consumption while preserving OCR quality.
-    """
-
-    try:
-
-        image = Image.open(
-            io.BytesIO(image_bytes)
-        )
-
-        image = image.convert(
-            "RGB"
-        )
-
-        width, height = image.size
-
-        # ----------------------------------------------------
-        # Calculate resize ratio.
-        # ----------------------------------------------------
-
-        largest_dimension = max(
-            width,
-            height,
-        )
-
-        if (
-            largest_dimension
-            > MAX_IMAGE_DIMENSION
-        ):
-
-            scale = (
-                MAX_IMAGE_DIMENSION
-                / largest_dimension
-            )
-
-            new_width = max(
-                1,
-                int(width * scale),
-            )
-
-            new_height = max(
-                1,
-                int(height * scale),
-            )
-
-            image = image.resize(
-                (
-                    new_width,
-                    new_height,
-                ),
-                Image.Resampling.LANCZOS,
-            )
-
-        # ----------------------------------------------------
-        # Use JPEG for smaller payload.
-        # ----------------------------------------------------
-
-        output = io.BytesIO()
-
-        image.save(
-            output,
-            format="JPEG",
-            quality=85,
-            optimize=True,
-        )
-
-        return (
-            output.getvalue(),
-            "image/jpeg",
-        )
-
-    except Exception as error:
-
-        print(
-            "Image optimization failed. "
-            "Using original image. "
-            f"Error: {error}"
-        )
-
-        return (
-            image_bytes,
-            mime_type,
-        )
-
-
-# ============================================================
-# IMAGE -> DATA URL
-# ============================================================
-
-def image_to_data_url(
-    image_bytes: bytes,
-    mime_type: str = "image/jpeg",
-) -> str:
-    """
-    Convert image bytes to a base64 data URL.
-    """
-
-    encoded = base64.b64encode(
-        image_bytes
-    ).decode(
-        "utf-8"
-    )
-
-    return (
-        f"data:{mime_type};base64,{encoded}"
-    )
-
-
-# ============================================================
-# CLEAN JSON
+# JSON CLEANING
 # ============================================================
 
 def clean_json_text(
@@ -266,61 +139,42 @@ def clean_json_text(
     if not text:
         return ""
 
-    text = str(
-        text
-    ).strip()
+    text = text.strip()
 
-    # --------------------------------------------------------
-    # Remove reasoning blocks.
-    # --------------------------------------------------------
-
+    # Remove <think> blocks.
     text = re.sub(
-        r"<think>.*?</think>",
+        r"<think>[\s\S]*?</think>",
         "",
         text,
-        flags=(
-            re.IGNORECASE
-            | re.DOTALL
-        ),
+        flags=re.IGNORECASE,
     ).strip()
 
-    # --------------------------------------------------------
-    # Remove markdown fences.
-    # --------------------------------------------------------
-
+    # Remove markdown code fences.
     text = re.sub(
-        r"```json",
+        r"^```(?:json)?\s*",
         "",
         text,
         flags=re.IGNORECASE,
     )
 
     text = re.sub(
-        r"```",
+        r"\s*```$",
         "",
         text,
+        flags=re.IGNORECASE,
     )
 
     text = text.strip()
 
-    # --------------------------------------------------------
     # Extract JSON object.
-    # --------------------------------------------------------
-
-    first = text.find(
-        "{"
-    )
-
-    last = text.rfind(
-        "}"
-    )
+    first = text.find("{")
+    last = text.rfind("}")
 
     if (
         first != -1
         and last != -1
         and last > first
     ):
-
         text = text[
             first:last + 1
         ]
@@ -329,14 +183,14 @@ def clean_json_text(
 
 
 # ============================================================
-# JSON PARSER
+# JSON PARSING
 # ============================================================
 
 def parse_json_response(
     text: str,
 ) -> Dict[str, Any]:
     """
-    Parse Groq JSON response safely.
+    Safely parse Groq JSON response.
     """
 
     cleaned = clean_json_text(
@@ -346,7 +200,8 @@ def parse_json_response(
     if not cleaned:
 
         raise ValueError(
-            "Groq returned an empty response."
+            "Groq returned an empty "
+            "question extraction response."
         )
 
     try:
@@ -387,6 +242,29 @@ def parse_json_response(
 
 
 # ============================================================
+# IMAGE -> DATA URL
+# ============================================================
+
+def image_to_data_url(
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+) -> str:
+    """
+    Convert image bytes into a base64 data URL.
+    """
+
+    encoded = base64.b64encode(
+        image_bytes
+    ).decode(
+        "utf-8"
+    )
+
+    return (
+        f"data:{mime_type};base64,{encoded}"
+    )
+
+
+# ============================================================
 # SAFE INTEGER
 # ============================================================
 
@@ -395,7 +273,7 @@ def safe_int(
     default: int = 0,
 ) -> int:
     """
-    Safely convert value to integer.
+    Safely convert a value to integer.
     """
 
     try:
@@ -413,14 +291,14 @@ def safe_int(
 
 
 # ============================================================
-# BBOX SANITIZATION
+# BOUNDING BOX
 # ============================================================
 
 def sanitize_bbox(
-    bbox: Any,
+    bbox: Dict[str, Any],
 ) -> Dict[str, int]:
     """
-    Normalize bounding box coordinates to 0-1000.
+    Normalize bbox coordinates to 0-1000.
     """
 
     if not isinstance(
@@ -503,17 +381,17 @@ def normalize_question_number(
     value: Any,
 ):
     """
-    Normalize common examination numbering formats.
+    Normalize examination question numbering.
 
     Examples:
 
-    Q1       -> 1
-    Q.1      -> 1
-    1.1      -> 1(a)
-    1(a)     -> 1(a)
-    1-a      -> 1(a)
-    1.a      -> 1(a)
-    1(ii)    -> 1(b)
+    Q1      -> 1
+    1.1     -> 1(a)
+    1(a)    -> 1(a)
+    1-a     -> 1(a)
+    1.a     -> 1(a)
+    1(i)    -> 1(a)
+    1(ii)   -> 1(b)
     """
 
     if value is None:
@@ -526,21 +404,18 @@ def normalize_question_number(
     if not value:
         return None
 
-    # Remove prefixes.
     value = re.sub(
         r"^(question|ques|que|answer|ans|q)\.?\s*",
         "",
         value,
     )
 
-    # Remove whitespace.
     value = re.sub(
         r"\s+",
         "",
         value,
     )
 
-    # Remove trailing period.
     value = value.rstrip(
         "."
     )
@@ -572,14 +447,12 @@ def normalize_question_number(
         )
 
         sub_number = int(
-            match.group(2)
+            match.group(
+                2
+            )
         )
 
-        if (
-            1
-            <= sub_number
-            <= 26
-        ):
+        if 1 <= sub_number <= 26:
 
             sub = chr(
                 ord("a")
@@ -611,6 +484,7 @@ def normalize_question_number(
         )
 
         if sub in roman_map:
+
             sub = roman_map[
                 sub
             ]
@@ -634,6 +508,7 @@ def normalize_question_number(
     )
 
     if match:
+
         return match.group(
             1
         )
@@ -650,7 +525,7 @@ def sanitize_questions(
     page_number: int,
 ) -> Dict[str, Any]:
     """
-    Validate and normalize model-generated questions.
+    Validate and normalize extracted questions.
     """
 
     if not isinstance(
@@ -687,11 +562,8 @@ def sanitize_questions(
             question,
             dict,
         ):
-            continue
 
-        # ----------------------------------------------------
-        # Number
-        # ----------------------------------------------------
+            continue
 
         number = normalize_question_number(
             question.get(
@@ -701,10 +573,6 @@ def sanitize_questions(
 
         if number is None:
             continue
-
-        # ----------------------------------------------------
-        # Text
-        # ----------------------------------------------------
 
         text = question.get(
             "text",
@@ -736,7 +604,7 @@ def sanitize_questions(
             )
 
         # ----------------------------------------------------
-        # Marks
+        # MARKS
         # ----------------------------------------------------
 
         max_marks = safe_int(
@@ -748,6 +616,7 @@ def sanitize_questions(
         )
 
         if max_marks <= 0:
+
             max_marks = 5
 
         # ----------------------------------------------------
@@ -760,6 +629,10 @@ def sanitize_questions(
                 {},
             )
         )
+
+        # ----------------------------------------------------
+        # FINAL OBJECT
+        # ----------------------------------------------------
 
         questions.append(
             {
@@ -780,179 +653,6 @@ def sanitize_questions(
 
 
 # ============================================================
-# GROQ ERROR INFORMATION
-# ============================================================
-
-def get_error_info(
-    error: Exception,
-) -> Dict[str, Any]:
-    """
-    Extract useful information from Groq/API exceptions.
-    """
-
-    message = str(
-        error
-    )
-
-    status_code = getattr(
-        error,
-        "status_code",
-        None,
-    )
-
-    response = getattr(
-        error,
-        "response",
-        None,
-    )
-
-    headers = {}
-
-    if response is not None:
-
-        headers = getattr(
-            response,
-            "headers",
-            {}
-        )
-
-    if headers is None:
-        headers = {}
-
-    retry_after = (
-        headers.get(
-            "retry-after"
-        )
-        or headers.get(
-            "Retry-After"
-        )
-    )
-
-    reset_tokens = (
-        headers.get(
-            "x-ratelimit-reset-tokens"
-        )
-        or headers.get(
-            "X-RateLimit-Reset-Tokens"
-        )
-    )
-
-    return {
-        "message": message,
-        "status_code": status_code,
-        "retry_after": retry_after,
-        "reset_tokens": reset_tokens,
-    }
-
-
-# ============================================================
-# RATE LIMIT DETECTION
-# ============================================================
-
-def is_rate_limit_error(
-    error: Exception,
-) -> bool:
-    """
-    Detect Groq rate-limit errors.
-    """
-
-    info = get_error_info(
-        error
-    )
-
-    message = info[
-        "message"
-    ].lower()
-
-    status_code = info[
-        "status_code"
-    ]
-
-    return (
-        status_code == 429
-        or "429" in message
-        or "rate_limit" in message
-        or "rate limit" in message
-        or "tokens per day" in message
-        or "tokens per minute" in message
-        or "rate_limit_exceeded" in message
-    )
-
-
-# ============================================================
-# RATE LIMIT MESSAGE
-# ============================================================
-
-def format_rate_limit_message(
-    error: Exception,
-) -> str:
-    """
-    Create a useful user/log message for 429 errors.
-    """
-
-    info = get_error_info(
-        error
-    )
-
-    message = info[
-        "message"
-    ]
-
-    retry_after = info[
-        "retry_after"
-    ]
-
-    reset_tokens = info[
-        "reset_tokens"
-    ]
-
-    # --------------------------------------------------------
-    # Extract "try again in XX"
-    # --------------------------------------------------------
-
-    match = re.search(
-        r"try again in\s+([^\.]+)",
-        message,
-        flags=re.IGNORECASE,
-    )
-
-    retry_text = (
-        match.group(1).strip()
-        if match
-        else None
-    )
-
-    details = []
-
-    if retry_text:
-        details.append(
-            f"try again in {retry_text}"
-        )
-
-    if retry_after:
-        details.append(
-            f"retry-after={retry_after}"
-        )
-
-    if reset_tokens:
-        details.append(
-            f"token-reset={reset_tokens}"
-        )
-
-    if details:
-
-        return (
-            "Groq rate limit reached: "
-            + ", ".join(details)
-        )
-
-    return (
-        "Groq rate limit reached. "
-        "Please wait for the quota to reset."
-    )
-
-
-# ============================================================
 # EXTRACT QUESTIONS FROM ONE PAGE
 # ============================================================
 
@@ -960,56 +660,20 @@ def extract_questions_from_page(
     image_bytes: bytes,
     page_number: int,
     mime_type: str = "image/png",
-) -> Dict[str, Any]:
+):
     """
-    Extract questions from one examination-paper page.
+    Extract questions from a single image page.
+
+    Uses Groq vision automatically.
     """
-
-    # --------------------------------------------------------
-    # Optimize image
-    # --------------------------------------------------------
-
-    optimized_image, optimized_mime = (
-        prepare_image_for_groq(
-            image_bytes,
-            mime_type,
-        )
-    )
-
-    print(
-        f"Original image size: "
-        f"{len(image_bytes) / 1024:.1f} KB"
-    )
-
-    print(
-        f"Groq image size: "
-        f"{len(optimized_image) / 1024:.1f} KB"
-    )
-
-    # --------------------------------------------------------
-    # Prompt
-    # --------------------------------------------------------
 
     page_prompt = (
         QUESTION_PROMPT
         + "\n\n"
-        + f"SUPPLIED PAGE NUMBER: {page_number}\n"
+        + f"This is page {page_number}.\n"
         + f"Every question MUST use page={page_number}.\n"
         + "\nReturn JSON only."
     )
-
-    # --------------------------------------------------------
-    # Image URL
-    # --------------------------------------------------------
-
-    image_data_url = image_to_data_url(
-        optimized_image,
-        optimized_mime,
-    )
-
-    # --------------------------------------------------------
-    # Message
-    # --------------------------------------------------------
 
     message_content = [
         {
@@ -1019,7 +683,10 @@ def extract_questions_from_page(
         {
             "type": "image_url",
             "image_url": {
-                "url": image_data_url,
+                "url": image_to_data_url(
+                    image_bytes,
+                    mime_type,
+                )
             },
         },
     ]
@@ -1029,50 +696,20 @@ def extract_questions_from_page(
         f"PAGE {page_number} =========="
     )
 
-    print(
-        f"Model: {MODEL_NAME}"
-    )
-
-    # ========================================================
-    # SINGLE API REQUEST
-    # ========================================================
-    #
-    # IMPORTANT:
-    #
-    # We intentionally do NOT retry a TPD error.
-    #
-    # Retrying a daily-token-limit request will not solve it.
-    #
-    # ========================================================
-
     try:
 
-        response = (
-            client.chat.completions.create(
-                model=MODEL_NAME,
-
-                messages=[
-                    {
-                        "role": "user",
-                        "content": message_content,
-                    }
-                ],
-
-                temperature=0,
-
-                max_completion_tokens=(
-                    MAX_COMPLETION_TOKENS
-                ),
-
-                # JSON mode is supported by the current
-                # Qwen 3.6 vision model.
-                #
-                # If the account/model rejects JSON mode,
-                # the fallback below retries once without it.
-                response_format={
-                    "type": "json_object"
-                },
-            )
+        response = call_vision(
+            messages=[
+                {
+                    "role": "user",
+                    "content": message_content,
+                }
+            ],
+            temperature=0,
+            max_tokens=2500,
+            response_format={
+                "type": "json_object"
+            },
         )
 
         raw = (
@@ -1084,7 +721,7 @@ def extract_questions_from_page(
 
         print(
             "\n========== GROQ QUESTION PAGE "
-            f"{page_number} RESPONSE =========="
+            f"{page_number} =========="
         )
 
         print(
@@ -1099,171 +736,43 @@ def extract_questions_from_page(
             raw
         )
 
-        sanitized = sanitize_questions(
+        return sanitize_questions(
             result,
             page_number,
         )
 
-        print(
-            f"Page {page_number}: "
-            f"{len(sanitized['questions'])} "
-            "question(s) extracted."
-        )
-
-        return sanitized
-
     except Exception as error:
-
-        # ====================================================
-        # 429
-        # ====================================================
-
-        if is_rate_limit_error(
-            error
-        ):
-
-            rate_message = (
-                format_rate_limit_message(
-                    error
-                )
-            )
-
-            print(
-                "\n========== GROQ RATE LIMIT =========="
-            )
-
-            print(
-                rate_message
-            )
-
-            print(
-                "====================================="
-            )
-
-            # IMPORTANT:
-            # Do not retry TPD errors.
-            raise RuntimeError(
-                rate_message
-            ) from error
-
-        # ====================================================
-        # JSON VALIDATION FALLBACK
-        # ====================================================
-        #
-        # Some model/account combinations can reject
-        # response_format even though the model supports
-        # JSON mode.
-        #
-        # In that case, make ONE fallback request without
-        # response_format.
-        # ====================================================
 
         error_message = str(
             error
-        ).lower()
-
-        json_validation_error = (
-            "json_validate_failed"
-            in error_message
-            or "failed to validate json"
-            in error_message
         )
-
-        if json_validation_error:
-
-            print(
-                "Groq JSON mode rejected."
-            )
-
-            print(
-                "Retrying once without "
-                "response_format..."
-            )
-
-            try:
-
-                response = (
-                    client.chat.completions.create(
-                        model=MODEL_NAME,
-
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": message_content,
-                            }
-                        ],
-
-                        temperature=0,
-
-                        max_completion_tokens=(
-                            MAX_COMPLETION_TOKENS
-                        ),
-                    )
-                )
-
-                raw = (
-                    response
-                    .choices[0]
-                    .message
-                    .content
-                )
-
-                print(
-                    "\n========== GROQ FALLBACK RESPONSE =========="
-                )
-
-                print(
-                    raw
-                )
-
-                print(
-                    "============================================"
-                )
-
-                result = parse_json_response(
-                    raw
-                )
-
-                return sanitize_questions(
-                    result,
-                    page_number,
-                )
-
-            except Exception as fallback_error:
-
-                if is_rate_limit_error(
-                    fallback_error
-                ):
-
-                    raise RuntimeError(
-                        format_rate_limit_message(
-                            fallback_error
-                        )
-                    ) from fallback_error
-
-                raise
-
-        # ====================================================
-        # OTHER ERROR
-        # ====================================================
 
         print(
             f"Question extraction page "
             f"{page_number} failed: "
-            f"{error}"
+            f"{error_message}"
         )
+
+        # Do not retry here.
+        #
+        # call_vision() already handles:
+        # - model fallback
+        # - 429 detection
+        #
+        # Repeating the same request here would
+        # unnecessarily consume Groq quota.
 
         raise
 
 
 # ============================================================
-# EXTRACT QUESTIONS
+# EXTRACT QUESTIONS FROM PDF / IMAGE
 # ============================================================
 
 def extract_questions(
     file_bytes: bytes,
     content_type: str,
-) -> Dict[str, Any]:
+):
     """
     Extract questions from PDF or image.
     """
@@ -1289,7 +798,7 @@ def extract_questions(
             }
 
         print(
-            f"\nQuestion paper contains "
+            "\nQuestion paper contains "
             f"{len(pages)} page(s)."
         )
 
@@ -1299,10 +808,10 @@ def extract_questions(
                 "page"
             ]
 
-            image_bytes = (
-                base64.b64decode(
-                    page["image"]
-                )
+            image_bytes = base64.b64decode(
+                page[
+                    "image"
+                ]
             )
 
             page_result = (
@@ -1336,14 +845,16 @@ def extract_questions(
 
     else:
 
+        image_mime_type = (
+            content_type
+            or "image/jpeg"
+        )
+
         page_result = (
             extract_questions_from_page(
                 image_bytes=file_bytes,
                 page_number=1,
-                mime_type=(
-                    content_type
-                    or "image/jpeg"
-                ),
+                mime_type=image_mime_type,
             )
         )
 
@@ -1359,7 +870,7 @@ def extract_questions(
     # ========================================================
 
     def question_sort_key(
-        item: Dict[str, Any],
+        item,
     ):
 
         number = str(
@@ -1369,13 +880,12 @@ def extract_questions(
             )
         )
 
-        # Main question number.
         match = re.match(
             r"(\d+)",
             number,
         )
 
-        main_number = (
+        question_number = (
             int(
                 match.group(1)
             )
@@ -1383,31 +893,12 @@ def extract_questions(
             else 999999
         )
 
-        # Subquestion letter.
-        sub_number = 0
-
-        sub_match = re.search(
-            r"\(([a-z])\)",
-            number,
-        )
-
-        if sub_match:
-
-            sub_number = (
-                ord(
-                    sub_match.group(1)
-                )
-                - ord("a")
-                + 1
-            )
-
         return (
             item.get(
                 "page",
                 999999,
             ),
-            main_number,
-            sub_number,
+            question_number,
         )
 
     all_questions = sorted(
@@ -1416,7 +907,7 @@ def extract_questions(
     )
 
     # ========================================================
-    # STABLE IDS
+    # STABLE IDs
     # ========================================================
 
     for index, question in enumerate(
@@ -1424,12 +915,12 @@ def extract_questions(
         start=1,
     ):
 
-        question["id"] = (
-            f"q{index}"
-        )
+        question[
+            "id"
+        ] = f"q{index}"
 
     # ========================================================
-    # FINAL LOG
+    # LOG FINAL RESULT
     # ========================================================
 
     print(
@@ -1437,7 +928,7 @@ def extract_questions(
     )
 
     print(
-        f"Total questions extracted: "
+        "Total questions extracted: "
         f"{len(all_questions)}"
     )
 
@@ -1448,7 +939,7 @@ def extract_questions(
             f'Q={question["number"]} | '
             f'Page={question["page"]} | '
             f'Marks={question["max_marks"]} | '
-            f'{question["text"][:120]}'
+            f'{question["text"][:100]}'
         )
 
     print(
