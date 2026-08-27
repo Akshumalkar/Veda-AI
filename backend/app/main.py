@@ -33,14 +33,17 @@ def health():
 
 @app.get("/debug")
 def debug():
-    from app.services.groq_client import MODEL_NAME, GROQ_API_KEY, client
-    key = GROQ_API_KEY or ""
-    key_status = "missing" if not key else ("placeholder" if key == "gsk_placeholder" else f"set ({key[:8]}...)")
+    try:
+        from app.services.groq_client import GROQ_API_KEY, VISION_MODEL, TEXT_MODEL, client
+        key = GROQ_API_KEY or ""
+        key_status = f"set ({key[:8]}...)" if key else "missing"
+    except RuntimeError as e:
+        return {"error": str(e), "groq_api_key": "missing - set GROQ_API_KEY in Render environment"}
 
     # Text test
     try:
         test = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=TEXT_MODEL,
             messages=[{"role": "user", "content": "Say OK"}],
             max_tokens=10,
         )
@@ -48,11 +51,11 @@ def debug():
     except Exception as e:
         groq_text_test = f"failed: {str(e)}"
 
-    # Vision test with a tiny 1x1 white PNG
+    # Vision test with a tiny 1x1 PNG
     tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
     try:
         vtest = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=VISION_MODEL,
             messages=[{
                 "role": "user",
                 "content": [
@@ -68,7 +71,9 @@ def debug():
 
     return {
         "groq_api_key": key_status,
-        "groq_model": MODEL_NAME,
+        "vision_model": VISION_MODEL,
+        "text_model": TEXT_MODEL,
         "groq_text_test": groq_text_test,
         "groq_vision_test": groq_vision_test,
-    }
+    }
+
