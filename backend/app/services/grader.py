@@ -109,6 +109,13 @@ def clean_json_text(text: str) -> str:
     if first != -1 and last != -1 and last > first:
         text = text[first:last + 1]
 
+    # Fix common LLM JSON syntax issues:
+    # 1. Stray quote after numbers: e.g. "max_marks": 5", -> "max_marks": 5,
+    text = re.sub(r':\s*(\d+(?:\.\d+)?)"\s*([,\}\]])', r': \1\2', text)
+    # 2. Trailing commas before closing braces
+    text = re.sub(r',\s*\}', '}', text)
+    text = re.sub(r',\s*\]', ']', text)
+
     return text.strip()
 
 
@@ -430,6 +437,30 @@ Example:
                 f"Invalid JSON while grading "
                 f"Q{question_number}: {error}"
             )
+
+            # Fallback: Extract grading fields with regex
+            try:
+                marks_match = re.search(r'["\']?(?:marks_awarded|score)["\']?\s*:\s*["\']?(\d+(?:\.\d+)?)', raw)
+                status_match = re.search(r'["\']?status["\']?\s*:\s*["\']([^"\']+)["\']', raw)
+                feedback_match = re.search(r'["\']?feedback["\']?\s*:\s*["\']([^"\']+)["\']', raw)
+
+                if marks_match:
+                    fallback_result = {
+                        "question_number": question_number,
+                        "marks_awarded": float(marks_match.group(1)),
+                        "max_marks": max_marks,
+                        "status": status_match.group(1) if status_match else "partially_correct",
+                        "feedback": feedback_match.group(1) if feedback_match else "Graded successfully.",
+                    }
+                    print(f"Recovered grade for Q{question_number} via regex fallback: {fallback_result}")
+                    return sanitize_grade(
+                        result=fallback_result,
+                        question_number=question_number,
+                        max_marks=max_marks,
+                        question_id=question_id,
+                    )
+            except Exception:
+                pass
 
             if attempt < 2:
 
