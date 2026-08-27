@@ -13,50 +13,65 @@ from app.services.groq_client import client, MODEL_NAME
 GRADING_PROMPT = """
 You are an expert examination evaluator.
 
-Grade ONE examination question using ONLY:
-1. The question provided.
-2. The student's answer provided.
+You are grading ONE examination question at a time.
 
-Rules:
+Evaluate ONLY the student's answer against the provided question.
 
-- Do not invent information.
-- Do not give marks for information the student did not write.
-- If the answer is empty, give 0 marks.
-- Award partial marks when appropriate.
-- Never exceed the maximum marks.
-- Consider definitions, concepts, explanations, formulas,
-  calculations, diagrams, examples and relevant technical terms.
-- For numerical questions consider formula, substitution,
-  calculation and final answer.
-- Keep feedback short and useful.
-- Return ONLY valid JSON.
-- Do not use markdown.
-- Do not include any text outside JSON.
+IMPORTANT RULES:
 
-Use exactly this JSON structure:
+1. Grade only the provided question.
+2. Grade only the provided student answer.
+3. Never invent missing content.
+4. Never give marks for information the student did not write.
+5. If the student answer is empty, give 0 marks.
+6. Consider:
+   - definitions
+   - concepts
+   - theory
+   - formulas
+   - calculations
+   - diagrams
+   - explanations
+   - examples
+   - technical terminology
+7. For numerical questions check:
+   - formula
+   - substitution
+   - calculation
+   - final answer
+8. Award partial marks when appropriate.
+9. Never exceed maximum marks.
+10. Keep feedback concise and useful.
+11. Return ONLY valid JSON.
+12. Do not return markdown.
+13. Do not return explanations outside JSON.
+
+The JSON must contain exactly these fields:
 
 {
-  "marks_awarded": 4,
-  "status": "partially_correct",
-  "feedback": "The main concept is correct but one important point is missing."
+    "question_number": "1",
+    "marks_awarded": 4,
+    "max_marks": 5,
+    "status": "partially_correct",
+    "feedback": "The main concept is correct but one important point is missing."
 }
 
 Allowed status values:
 
-"correct"
-"partially_correct"
-"incorrect"
-"unanswered"
+correct
+partially_correct
+incorrect
+unanswered
 """
 
 
 # ============================================================
-# JSON CLEANING
+# JSON CLEANER
 # ============================================================
 
 def clean_json_text(text: str) -> str:
     """
-    Clean and extract a JSON object from Groq output.
+    Clean model output and extract a JSON object.
     """
 
     if not text:
@@ -64,7 +79,7 @@ def clean_json_text(text: str) -> str:
 
     text = str(text).strip()
 
-    # Remove <think>...</think> blocks.
+    # Remove <think>...</think>
     text = re.sub(
         r"<think>[\s\S]*?</think>",
         "",
@@ -72,24 +87,17 @@ def clean_json_text(text: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
 
-    # Remove markdown code fences.
-    text = re.sub(
-        r"^```(?:json)?\s*",
-        "",
+    # Remove markdown code fences
+    match = re.search(
+        r"```(?:json)?\s*([\s\S]*?)\s*```",
         text,
         flags=re.IGNORECASE,
     )
 
-    text = re.sub(
-        r"\s*```$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    if match:
+        text = match.group(1).strip()
 
-    text = text.strip()
-
-    # Extract first JSON object.
+    # Extract JSON object
     first = text.find("{")
     last = text.rfind("}")
 
@@ -99,36 +107,8 @@ def clean_json_text(text: str) -> str:
     return text.strip()
 
 
-def parse_json_response(text: str) -> Dict[str, Any]:
-    """
-    Safely parse Groq JSON response.
-    """
-
-    cleaned = clean_json_text(text)
-
-    if not cleaned:
-        raise ValueError(
-            "Groq returned an empty grading response."
-        )
-
-    try:
-        result = json.loads(cleaned)
-
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"Invalid JSON returned by Groq: {error}"
-        ) from error
-
-    if not isinstance(result, dict):
-        raise ValueError(
-            "Groq grading response is not a JSON object."
-        )
-
-    return result
-
-
 # ============================================================
-# SAFE VALUE HELPERS
+# SAFE CONVERSIONS
 # ============================================================
 
 def safe_int(
@@ -141,11 +121,7 @@ def safe_int(
 
     try:
         return int(float(value))
-
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return default
 
 
@@ -159,11 +135,7 @@ def safe_float(
 
     try:
         return float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return default
 
 
@@ -184,29 +156,27 @@ def sanitize_grade(
     if not isinstance(result, dict):
         result = {}
 
-    # Support both:
-    # marks_awarded
-    # score
-    awarded = result.get(
-        "marks_awarded",
-        result.get(
-            "score",
-            0,
-        ),
-    )
-
     awarded = safe_float(
-        awarded,
+        result.get(
+            "marks_awarded",
+            result.get(
+                "score",
+                0,
+            ),
+        ),
         0.0,
     )
 
-    # Keep score inside valid range.
+    # Never allow negative marks
     awarded = max(
         0.0,
-        min(
-            float(max_marks),
-            awarded,
-        ),
+        awarded,
+    )
+
+    # Never exceed maximum marks
+    awarded = min(
+        float(max_marks),
+        awarded,
     )
 
     status = str(
@@ -238,8 +208,8 @@ def sanitize_grade(
         feedback
     ).strip()
 
-    # Make status consistent with score.
-    if awarded <= 0:
+    # Automatically normalize status according to score
+    if awarded == 0:
 
         if status not in {
             "unanswered",
@@ -253,22 +223,18 @@ def sanitize_grade(
     elif awarded >= float(max_marks):
 
         awarded = float(max_marks)
-
         status = "correct"
 
         if not feedback:
-            feedback = "The answer is correct."
+            feedback = "The answer satisfies the required points."
 
     else:
 
         if status == "correct":
             status = "partially_correct"
 
-        if status == "unanswered":
+        if status == "incorrect":
             status = "partially_correct"
-
-        if not feedback:
-            feedback = "The answer is partially correct."
 
     return {
         "question_id": question_id,
@@ -297,8 +263,7 @@ def grade_single_question(
     """
     Grade one question independently.
 
-    One question is sent to Groq at a time to keep
-    requests small and reduce token usage.
+    One question per Groq request prevents large TPM requests.
     """
 
     question_id = (
@@ -336,16 +301,11 @@ def grade_single_question(
     if max_marks <= 0:
         max_marks = 5
 
-    # --------------------------------------------------------
-    # Unanswered
-    # --------------------------------------------------------
+    # ========================================================
+    # UNANSWERED
+    # ========================================================
 
     if not answer_text:
-
-        print(
-            f"Q{question_number}: No answer. "
-            "Skipping Groq."
-        )
 
         return {
             "question_id": question_id,
@@ -355,14 +315,12 @@ def grade_single_question(
             "marks_awarded": 0,
             "max_marks": max_marks,
             "status": "unanswered",
-            "feedback": (
-                "No answer was written for this question."
-            ),
+            "feedback": "No answer was written for this question.",
         }
 
-    # --------------------------------------------------------
-    # Build small grading prompt
-    # --------------------------------------------------------
+    # ========================================================
+    # USER PROMPT
+    # ========================================================
 
     user_prompt = f"""
 {GRADING_PROMPT}
@@ -379,22 +337,38 @@ QUESTION:
 STUDENT ANSWER:
 {answer_text}
 
-Return JSON only.
+Evaluate the student's answer now.
+
+Return ONLY one JSON object.
+
+Do not use markdown.
+Do not use code fences.
+Do not add any text before or after the JSON.
+
+Example:
+
+{{
+    "question_number": "{question_number}",
+    "marks_awarded": 3,
+    "max_marks": {max_marks},
+    "status": "partially_correct",
+    "feedback": "The answer explains the main concept but misses two important points."
+}}
 """
 
     last_error: Optional[Exception] = None
 
-    # --------------------------------------------------------
-    # Retry only non-rate-limit failures
-    # --------------------------------------------------------
+    # ========================================================
+    # RETRIES
+    # ========================================================
 
-    for attempt in range(2):
+    for attempt in range(3):
 
         try:
 
             print(
                 f"Groq grading Q{question_number} "
-                f"attempt {attempt + 1}/2..."
+                f"attempt {attempt + 1}/3..."
             )
 
             response = client.chat.completions.create(
@@ -409,13 +383,15 @@ Return JSON only.
 
                 temperature=0,
 
-                # Keep output small.
-                max_tokens=300,
+                max_completion_tokens=500,
 
-                # Force JSON response.
                 response_format={
                     "type": "json_object"
                 },
+
+                # Qwen reasoning models work better when
+                # reasoning output is hidden for JSON tasks.
+                reasoning_format="hidden",
             )
 
             raw = (
@@ -425,29 +401,34 @@ Return JSON only.
                 .content
             )
 
-            print(
-                f"\n========== GROQ GRADING Q"
-                f"{question_number} =========="
-            )
-
-            print(raw)
-
-            print(
-                "==========================================\n"
-            )
-
-            result = parse_json_response(
+            raw = clean_json_text(
                 raw
             )
 
-            grade = sanitize_grade(
+            print(
+                f"Raw grading response Q{question_number}: "
+                f"{raw[:1000]}"
+            )
+
+            if not raw:
+                raise ValueError(
+                    "Groq returned an empty grading response."
+                )
+
+            result = json.loads(
+                raw
+            )
+
+            return sanitize_grade(
                 result=result,
                 question_number=question_number,
                 max_marks=max_marks,
                 question_id=question_id,
             )
 
-            return grade
+        # ====================================================
+        # INVALID JSON
+        # ====================================================
 
         except json.JSONDecodeError as error:
 
@@ -458,8 +439,19 @@ Return JSON only.
                 f"Q{question_number}: {error}"
             )
 
-            if attempt == 0:
-                sleep(2)
+            if attempt < 2:
+
+                wait_seconds = (
+                    attempt + 1
+                ) * 2
+
+                sleep(
+                    wait_seconds
+                )
+
+        # ====================================================
+        # OTHER ERRORS
+        # ====================================================
 
         except Exception as error:
 
@@ -469,72 +461,56 @@ Return JSON only.
                 error
             )
 
-            error_lower = error_message.lower()
-
             print(
                 f"Groq grading Q{question_number} "
-                f"attempt {attempt + 1}/2 failed: "
+                f"attempt {attempt + 1}/3 failed: "
                 f"{error_message}"
             )
 
+            lower_error = (
+                error_message.lower()
+            )
+
             # ------------------------------------------------
-            # NEVER RETRY RATE LIMITS
+            # Do NOT retry hard API limits
             # ------------------------------------------------
 
-            is_rate_limit = (
+            if (
                 "429" in error_message
-                or "rate_limit" in error_lower
-                or "rate limit" in error_lower
-                or "tokens per minute" in error_lower
-                or "tokens per day" in error_lower
-                or "tpd" in error_lower
-                or "tpm" in error_lower
-            )
-
-            if is_rate_limit:
+                or "rate_limit" in lower_error
+                or "rate limit" in lower_error
+                or "tokens per minute" in lower_error
+                or "413" in error_message
+                or "model_not_found" in lower_error
+                or "does not exist" in lower_error
+                or "json_validate_failed" in lower_error
+            ):
 
                 print(
-                    f"Groq rate limit reached while "
+                    f"Non-retryable Groq error while "
                     f"grading Q{question_number}."
                 )
 
                 raise error
 
             # ------------------------------------------------
-            # Oversized request
+            # Retry temporary failures
             # ------------------------------------------------
 
-            is_too_large = (
-                "413" in error_message
-                or "request too large" in error_lower
-                or "too many tokens" in error_lower
-            )
+            if attempt < 2:
 
-            if is_too_large:
-
-                print(
-                    f"Groq request too large while "
-                    f"grading Q{question_number}."
-                )
-
-                raise error
-
-            # ------------------------------------------------
-            # Retry temporary errors once
-            # ------------------------------------------------
-
-            if attempt == 0:
+                wait_seconds = (
+                    attempt + 1
+                ) * 2
 
                 print(
                     f"Retrying Q{question_number} "
-                    "in 2 seconds..."
+                    f"in {wait_seconds} seconds..."
                 )
 
-                sleep(2)
-
-    # --------------------------------------------------------
-    # Final failure
-    # --------------------------------------------------------
+                sleep(
+                    wait_seconds
+                )
 
     if last_error:
         raise last_error
@@ -556,7 +532,8 @@ def combine_answer_text(
     Combine multiple answer objects belonging
     to the same question.
 
-    Useful when an answer continues on another page.
+    Useful when an answer continues onto
+    another page.
     """
 
     if not answers:
@@ -577,17 +554,16 @@ def combine_answer_text(
             "",
         )
 
-        if text is None:
-            continue
-
-        text = str(
-            text
-        ).strip()
-
         if text:
-            parts.append(
+
+            text = str(
                 text
-            )
+            ).strip()
+
+            if text:
+                parts.append(
+                    text
+                )
 
     return "\n".join(
         parts
@@ -607,13 +583,12 @@ def grade_assessment(
     """
 
     print(
-        "\n========== STARTING QUESTION-BY-QUESTION "
-        "GRADING =========="
+        "\n========== STARTING QUESTION-BY-QUESTION GRADING =========="
     )
 
-    # --------------------------------------------------------
-    # Group answers by question number
-    # --------------------------------------------------------
+    # ========================================================
+    # GROUP ANSWERS BY QUESTION NUMBER
+    # ========================================================
 
     answer_map: Dict[
         str,
@@ -644,29 +619,21 @@ def grade_assessment(
 
         answer_map.setdefault(
             question_number,
-            [],
+            []
         ).append(
             answer
         )
 
     print(
-        f"Questions received: {len(questions)}"
-    )
-
-    print(
-        f"Answer objects received: {len(answers)}"
-    )
-
-    print(
-        f"Mapped question numbers: "
+        f"Answer groups detected: "
         f"{len(answer_map)}"
     )
 
-    grades = []
+    # ========================================================
+    # GRADE EVERY QUESTION
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Grade every question
-    # --------------------------------------------------------
+    grades = []
 
     for index, question in enumerate(
         questions,
@@ -702,7 +669,7 @@ def grade_assessment(
 
         matching_answers = answer_map.get(
             question_number,
-            [],
+            []
         )
 
         answer_text = combine_answer_text(
@@ -722,21 +689,19 @@ def grade_assessment(
         )
 
         print(
-            f"Matching answer objects: "
+            f"Answer objects: "
             f"{len(matching_answers)}"
         )
 
-        # ----------------------------------------------------
-        # Grade
-        # ----------------------------------------------------
+        # ====================================================
+        # GRADE
+        # ====================================================
 
         grade = grade_single_question(
             question=question,
             answer_text=answer_text,
             max_marks=max_marks,
-            question_id=question.get(
-                "id"
-            ),
+            question_id=question.get("id"),
         )
 
         grades.append(
@@ -750,12 +715,16 @@ def grade_assessment(
             f"({grade['status']})"
         )
 
-        # Small delay between requests.
+        # Small delay between requests
         sleep(0.5)
 
-    # --------------------------------------------------------
-    # Calculate totals
-    # --------------------------------------------------------
+    # ========================================================
+    # TOTAL
+    # ========================================================
+
+    print(
+        "\n========== GRADING COMPLETE =========="
+    )
 
     total_marks = sum(
         safe_float(
@@ -778,23 +747,15 @@ def grade_assessment(
     )
 
     print(
-        "\n========== GRADING COMPLETE =========="
-    )
-
-    print(
         f"Total score: "
         f"{total_marks}/{maximum_marks}"
-    )
-
-    print(
-        "=======================================\n"
     )
 
     return grades
 
 
 # ============================================================
-# BACKWARD COMPATIBILITY
+# BACKWARD-COMPATIBLE grade_answers()
 # ============================================================
 
 def grade_answers(
@@ -805,16 +766,24 @@ def grade_answers(
     answer_content_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Backward-compatible grading function.
+    Grade answers.
 
-    Supports:
+    Supported signatures:
 
-    1. grade_answers(matches, question_bytes,
-                     question_content_type,
-                     answer_bytes,
-                     answer_content_type)
+    1.
+    grade_answers(
+        matches,
+        question_bytes,
+        question_content_type,
+        answer_bytes,
+        answer_content_type
+    )
 
-    2. grade_answers(questions, answers)
+    2.
+    grade_answers(
+        questions,
+        answers
+    )
     """
 
     # ========================================================
@@ -822,11 +791,6 @@ def grade_answers(
     # ========================================================
 
     if not matches_or_questions:
-
-        print(
-            "No questions or matches available for grading."
-        )
-
         return []
 
     # ========================================================
@@ -838,21 +802,25 @@ def grade_answers(
         list,
     ):
 
-        first_item = matches_or_questions[0]
+        first_item = (
+            matches_or_questions[0]
+        )
 
-        if isinstance(
-            first_item,
-            dict,
-        ) and (
-            "question" in first_item
-            or "answer" in first_item
-            or "answer_id" in first_item
-            or "question_id" in first_item
+        if (
+            isinstance(
+                first_item,
+                dict,
+            )
+            and (
+                "question" in first_item
+                or "answer" in first_item
+                or "answer_id" in first_item
+                or "question_id" in first_item
+            )
         ):
 
             print(
-                "\n========== STARTING "
-                "GRADING FROM MATCHES =========="
+                "\n========== STARTING GRADING FROM MATCHES =========="
             )
 
             grades = []
@@ -915,44 +883,39 @@ def grade_answers(
                 if max_marks <= 0:
                     max_marks = 5
 
-                status = str(
+                match_status = (
                     match.get(
-                        "status",
+                        "status"
+                    )
+                )
+
+                answer_text = str(
+                    answer.get(
+                        "text",
                         "",
                     )
-                ).strip().lower()
+                    if isinstance(
+                        answer,
+                        dict,
+                    )
+                    else ""
+                ).strip()
 
-                answer_text = ""
-
-                if isinstance(
-                    answer,
-                    dict,
-                ):
-
-                    answer_text = str(
-                        answer.get(
-                            "text",
-                            "",
-                        )
-                        or ""
-                    ).strip()
-
-                # ------------------------------------------------
-                # Unanswered
-                # ------------------------------------------------
+                # =================================================
+                # UNANSWERED
+                # =================================================
 
                 if (
-                    status == "unanswered"
+                    match_status == "unanswered"
                     or not answer_text
                 ):
 
                     print(
-                        "\n----------------------------------------"
+                        f"\n----------------------------------------"
                     )
 
                     print(
-                        f"QUESTION "
-                        f"{question_number} "
+                        f"QUESTION {question_number} "
                         "(Unanswered)"
                     )
 
@@ -973,22 +936,20 @@ def grade_answers(
 
                     continue
 
-                # ------------------------------------------------
-                # Grade matched answer
-                # ------------------------------------------------
+                # =================================================
+                # GRADE MATCH
+                # =================================================
 
                 print(
-                    "\n----------------------------------------"
+                    f"\n----------------------------------------"
                 )
 
                 print(
-                    f"QUESTION "
-                    f"{question_number}"
+                    f"QUESTION {question_number}"
                 )
 
                 print(
-                    f"Max marks: "
-                    f"{max_marks}"
+                    f"Max marks: {max_marks}"
                 )
 
                 grade = grade_single_question(
@@ -1011,9 +972,13 @@ def grade_answers(
 
                 sleep(0.5)
 
-            # ------------------------------------------------
-            # Match grading totals
-            # ------------------------------------------------
+            # =================================================
+            # TOTAL
+            # =================================================
+
+            print(
+                "\n========== GRADING COMPLETE =========="
+            )
 
             total_marks = sum(
                 safe_float(
@@ -1036,23 +1001,14 @@ def grade_answers(
             )
 
             print(
-                "\n========== MATCH GRADING COMPLETE =========="
-            )
-
-            print(
                 f"Total score: "
-                f"{total_marks}/"
-                f"{maximum_marks}"
-            )
-
-            print(
-                "=============================================\n"
+                f"{total_marks}/{maximum_marks}"
             )
 
             return grades
 
     # ========================================================
-    # QUESTIONS + ANSWERS
+    # NORMAL questions + answers
     # ========================================================
 
     answers = (
