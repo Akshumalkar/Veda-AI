@@ -8,179 +8,120 @@ from app.services.groq_client import client, MODEL_NAME
 from app.utils.pdf import pdf_to_images
 
 
+# ============================================================
+# QUESTION EXTRACTION PROMPT
+# ============================================================
+
 QUESTION_PROMPT = """
-You are an expert examination-paper vision AI.
-
-Analyze ONLY the supplied question-paper page.
-
-Extract EVERY printed question visible on this page.
+Extract every visible examination question from this page.
 
 IMPORTANT:
-- This is a QUESTION PAPER.
-- Extract questions only.
-- Do NOT extract instructions, headings, student information,
-  signatures, college name, exam name, or page decorations.
-- Do NOT invent missing questions.
-- Do NOT combine separate questions.
-- Preserve the original printed question numbering.
-- Treat labelled sub-parts as separate questions.
+Return ONLY a JSON object.
+Do NOT return markdown.
+Do NOT return ```json.
+Do NOT return explanations.
+Do NOT return reasoning.
+Do NOT return <think> tags.
 
-Examples:
-
-11(a) -> separate question
-11(b) -> separate question
-
-If the paper contains:
-
-Q1. Define photosynthesis.
-Q2. Explain respiration.
-Q3(a). What is...
-Q3(b). Explain...
-
-Return:
-
-1
-2
-3(a)
-3(b)
-
-QUESTION NUMBER RULES:
-
-Preserve numbering as written.
-
-Examples:
-
-Q1       -> "1"
-Q.1      -> "1"
-1.       -> "1"
-
-Q1(a)    -> "1(a)"
-Q1 (a)   -> "1(a)"
-1(a)     -> "1(a)"
-1 (a)    -> "1(a)"
-
-Do NOT convert 11(a) into 11.
-
-MARKS:
-
-Extract marks when visible.
-
-Examples:
-
-(5 marks)
-[5]
-5 Marks
-5M
-5
-
-If marks are not visible, use:
-
-5
-
-QUESTION TEXT:
-
-Transcribe the actual printed question accurately.
-
-Do not rewrite the question.
-
-Preserve:
-
-- formulas
-- chemical equations
-- mathematical symbols
-- technical terms
-- punctuation
-- sub-parts
-- units
-
-BBOX:
-
-For every question, return a bounding box covering the actual
-printed question.
-
-Coordinates MUST be normalized from 0 to 1000.
-
-Coordinate system:
-
-x = left to right
-y = top to bottom
-
-Example:
+Required JSON structure:
 
 {
-    "x": 100,
-    "y": 200,
-    "width": 700,
-    "height": 120
+  "questions": [
+    {
+      "id": "q1",
+      "number": "1",
+      "text": "complete question text",
+      "page": 1,
+      "max_marks": 5,
+      "bbox": {
+        "x": 100,
+        "y": 100,
+        "width": 800,
+        "height": 50
+      }
+    }
+  ]
 }
 
-The bbox must NOT cover the entire page unless the question actually
-occupies the entire page.
+Rules:
 
-PAGE:
-
-Use the supplied page number exactly.
-
-OUTPUT:
-
-Return ONLY valid JSON.
-
-Do not return markdown.
-
-Do not return explanations.
-
-Required format:
-
-{
-    "questions": [
-        {
-            "id": "q1",
-            "number": "1",
-            "text": "Question text",
-            "page": 1,
-            "max_marks": 5,
-            "bbox": {
-                "x": 100,
-                "y": 200,
-                "width": 700,
-                "height": 120
-            }
-        }
-    ]
-}
-
-If there are no questions on the page:
-
-{
-    "questions": []
-}
+- Extract EVERY visible examination question.
+- Preserve the printed question numbering exactly.
+- Treat subquestions separately.
+- Examples:
+  - 5(a)
+  - 5(b)
+  - 6(i)
+  - 6(ii)
+- Preserve the COMPLETE visible question text.
+- Do not summarize questions.
+- Ignore headers.
+- Ignore college names.
+- Ignore exam instructions.
+- Ignore student information.
+- Ignore page numbers that are not part of a question.
+- Use normalized bbox coordinates from 0 to 1000.
+- The bbox must cover the visible question text.
+- Use the printed marks if visible.
+- If marks are not visible, use 5.
+- Use the supplied page number.
+- Every question must contain:
+  id
+  number
+  text
+  page
+  max_marks
+  bbox
+- Do not invent questions.
+- Do not duplicate questions.
+- Return a valid JSON object.
 """
 
+
+# ============================================================
+# JSON CLEANING
+# ============================================================
 
 def clean_json_text(text: str) -> str:
     """
     Clean model output before JSON parsing.
+    Handles:
+    - markdown fences
+    - <think> tags
+    - accidental text before/after JSON
     """
 
     if not text:
         return ""
 
-    text = text.strip()
+    text = str(text).strip()
 
-    # Remove reasoning/think tags if returned by Groq models.
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    # Remove reasoning blocks.
+    text = re.sub(
+        r"<think>[\s\S]*?</think>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
 
     # Remove markdown code fences.
-    match = re.search(
-        r"```(?:json)?\s*([\s\S]*?)\s*```",
+    text = re.sub(
+        r"^```(?:json)?\s*",
+        "",
         text,
         flags=re.IGNORECASE,
     )
 
-    if match:
-        text = match.group(1).strip()
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
 
-    # Remove accidental leading/trailing text around JSON.
+    text = text.strip()
+
+    # Extract JSON object if extra text exists.
     first_brace = text.find("{")
     last_brace = text.rfind("}")
 
@@ -194,6 +135,53 @@ def clean_json_text(text: str) -> str:
     return text.strip()
 
 
+def parse_json_response(text: str) -> Dict[str, Any]:
+    """
+    Safely parse JSON returned by Groq.
+    """
+
+    if not text:
+        raise ValueError(
+            "Groq returned an empty response."
+        )
+
+    cleaned = clean_json_text(text)
+
+    if not cleaned:
+        raise ValueError(
+            "Groq returned an empty JSON response."
+        )
+
+    try:
+        result = json.loads(cleaned)
+
+    except json.JSONDecodeError as error:
+
+        # Log the exact problematic response.
+        print(
+            "\n========== INVALID GROQ JSON =========="
+        )
+        print(cleaned)
+        print(
+            "========================================\n"
+        )
+
+        raise ValueError(
+            f"Invalid JSON returned by Groq: {error}"
+        ) from error
+
+    if not isinstance(result, dict):
+        raise ValueError(
+            "Groq JSON response is not an object."
+        )
+
+    return result
+
+
+# ============================================================
+# IMAGE -> BASE64 DATA URL
+# ============================================================
+
 def image_to_data_url(
     image_bytes: bytes,
     mime_type: str = "image/png",
@@ -206,14 +194,20 @@ def image_to_data_url(
         image_bytes
     ).decode("utf-8")
 
-    return f"data:{mime_type};base64,{encoded}"
+    return (
+        f"data:{mime_type};base64,{encoded}"
+    )
 
+
+# ============================================================
+# BBOX SANITIZATION
+# ============================================================
 
 def sanitize_bbox(
     bbox: Dict[str, Any],
 ) -> Dict[str, int]:
     """
-    Keep bbox values inside 0-1000 normalized coordinates.
+    Keep bbox values inside normalized 0-1000 coordinates.
     """
 
     if not isinstance(bbox, dict):
@@ -231,6 +225,7 @@ def sanitize_bbox(
 
         try:
             return int(float(value))
+
         except (
             TypeError,
             ValueError,
@@ -257,6 +252,7 @@ def sanitize_bbox(
         0,
     )
 
+    # Clamp x/y.
     x = max(
         0,
         min(1000, x),
@@ -267,6 +263,7 @@ def sanitize_bbox(
         min(1000, y),
     )
 
+    # Clamp width/height.
     width = max(
         0,
         min(
@@ -291,6 +288,10 @@ def sanitize_bbox(
     }
 
 
+# ============================================================
+# QUESTION NUMBER NORMALIZATION
+# ============================================================
+
 def normalize_question_number(
     value: Any,
 ):
@@ -311,7 +312,9 @@ def normalize_question_number(
     if value is None:
         return None
 
-    value = str(value).strip().lower()
+    value = str(
+        value
+    ).strip().lower()
 
     if not value:
         return None
@@ -323,12 +326,14 @@ def normalize_question_number(
         value,
     )
 
+    # Remove whitespace.
     value = re.sub(
         r"\s+",
         "",
         value,
     )
 
+    # Remove trailing period.
     value = value.rstrip(".")
 
     roman_map = {
@@ -342,7 +347,10 @@ def normalize_question_number(
         "viii": "h",
     }
 
+    # --------------------------------------------------------
     # 1.1 / 1.2 / 1.3
+    # --------------------------------------------------------
+
     match = re.match(
         r"^(\d+)\.(\d+)$",
         value,
@@ -366,7 +374,10 @@ def normalize_question_number(
 
             return f"{number}({sub})"
 
+    # --------------------------------------------------------
     # 1(a), 1[ii], 1-a, 1.a, 1a, 1(ii)
+    # --------------------------------------------------------
+
     match = re.match(
         r"^(\d+)[\(\[\.\-_]?([a-z]+|[ivx]+)[\)\]]?$",
         value,
@@ -387,7 +398,10 @@ def normalize_question_number(
         ):
             return f"{number}({sub})"
 
-    # Plain number.
+    # --------------------------------------------------------
+    # Plain number
+    # --------------------------------------------------------
+
     match = re.match(
         r"^(\d+)$",
         value,
@@ -398,6 +412,10 @@ def normalize_question_number(
 
     return value
 
+
+# ============================================================
+# QUESTION SANITIZATION
+# ============================================================
 
 def sanitize_questions(
     result: Dict[str, Any],
@@ -470,6 +488,7 @@ def sanitize_questions(
         )
 
         if not question_id:
+
             question_id = (
                 f"q{page_number}_{index}"
             )
@@ -480,13 +499,16 @@ def sanitize_questions(
         )
 
         try:
+
             max_marks = int(
                 float(max_marks)
             )
+
         except (
             TypeError,
             ValueError,
         ):
+
             max_marks = 5
 
         if max_marks <= 0:
@@ -498,17 +520,24 @@ def sanitize_questions(
         )
 
         try:
+
             returned_page = int(
                 returned_page
             )
+
         except (
             TypeError,
             ValueError,
         ):
+
             returned_page = page_number
 
         if returned_page < 1:
             returned_page = page_number
+
+        # IMPORTANT:
+        # Always force the actual page being processed.
+        returned_page = page_number
 
         bbox = sanitize_bbox(
             question.get(
@@ -535,6 +564,10 @@ def sanitize_questions(
     }
 
 
+# ============================================================
+# EXTRACT QUESTIONS FROM ONE PAGE
+# ============================================================
+
 def extract_questions_from_page(
     image_bytes: bytes,
     page_number: int,
@@ -543,12 +576,13 @@ def extract_questions_from_page(
     """
     Send ONE page at a time to Groq.
 
-    This is intentional because it improves:
-    - page accuracy
-    - bbox accuracy
-    - question ordering
-    - reliability
-    - token usage
+    Improvements:
+    - JSON mode enabled
+    - reasoning disabled
+    - lower output token limit
+    - fewer retries
+    - rate-limit errors stop immediately
+    - malformed JSON is handled
     """
 
     page_prompt = (
@@ -556,9 +590,9 @@ def extract_questions_from_page(
         + "\n\n"
         + f"IMPORTANT: This is page {page_number} "
         + "of the question paper.\n"
-        + f"Every question extracted from this image "
-        + f"MUST use page={page_number}.\n"
-        + "Do not use another page number.\n"
+        + f"Every extracted question MUST use "
+        + f"page={page_number}.\n"
+        + "Return ONLY the JSON object."
     )
 
     message_content = [
@@ -579,27 +613,47 @@ def extract_questions_from_page(
 
     last_error = None
 
-    for attempt in range(3):
+    # Only retry once for malformed/temporary responses.
+    # Do NOT waste daily tokens with 3 full requests.
+    max_attempts = 2
+
+    for attempt in range(
+        max_attempts
+    ):
 
         try:
 
             print(
                 "\n========== QUESTION EXTRACTION "
                 f"PAGE {page_number} "
-                f"ATTEMPT {attempt + 1}/3 =========="
+                f"ATTEMPT {attempt + 1}/{max_attempts} =========="
             )
 
             response = (
                 client.chat.completions.create(
                     model=MODEL_NAME,
+
                     messages=[
                         {
                             "role": "user",
                             "content": message_content,
                         }
                     ],
+
+                    # Deterministic extraction.
                     temperature=0,
-                    max_tokens=4096,
+
+                    # Qwen 3.6 supports hidden reasoning.
+                    reasoning_format="hidden",
+
+                    # Force valid JSON.
+                    response_format={
+                        "type": "json_object"
+                    },
+
+                    # Questions normally require
+                    # much less output than 4096 tokens.
+                    max_tokens=2048,
                 )
             )
 
@@ -610,16 +664,14 @@ def extract_questions_from_page(
                 .content
             )
 
-            raw = clean_json_text(
-                raw
-            )
-
             print(
                 "\n========== GROQ QUESTION PAGE "
                 f"{page_number} =========="
             )
 
-            print(raw)
+            print(
+                raw
+            )
 
             print(
                 "==========================================\n"
@@ -630,7 +682,7 @@ def extract_questions_from_page(
                     "Groq returned an empty response."
                 )
 
-            result = json.loads(
+            result = parse_json_response(
                 raw
             )
 
@@ -640,21 +692,6 @@ def extract_questions_from_page(
             )
 
             return result
-
-        except json.JSONDecodeError as error:
-
-            last_error = error
-
-            print(
-                "Invalid JSON returned by Groq: "
-                f"{error}"
-            )
-
-            if attempt < 2:
-
-                sleep(
-                    (attempt + 1) * 3
-                )
 
         except Exception as error:
 
@@ -667,17 +704,24 @@ def extract_questions_from_page(
             print(
                 "Groq question extraction "
                 f"page {page_number} "
-                f"attempt {attempt + 1}/3 failed: "
-                f"{error_message}"
+                f"attempt {attempt + 1}/{max_attempts} "
+                f"failed: {error_message}"
             )
 
-            # Never retry rate limits.
+            lower_error = (
+                error_message.lower()
+            )
+
+            # ------------------------------------------------
+            # RATE LIMIT
+            # ------------------------------------------------
+
             if (
                 "429" in error_message
-                or "rate_limit"
-                in error_message.lower()
-                or "rate limit"
-                in error_message.lower()
+                or "rate_limit" in lower_error
+                or "rate limit" in lower_error
+                or "tokens per day" in lower_error
+                or "tokens per minute" in lower_error
             ):
 
                 print(
@@ -687,12 +731,33 @@ def extract_questions_from_page(
 
                 raise error
 
-            # Retry other temporary errors.
-            if attempt < 2:
+            # ------------------------------------------------
+            # INVALID JSON
+            # ------------------------------------------------
 
-                wait_seconds = (
-                    attempt + 1
-                ) * 3
+            if (
+                "invalid json" in lower_error
+                or "json" in lower_error
+            ):
+
+                if attempt < max_attempts - 1:
+
+                    print(
+                        "Invalid JSON detected. "
+                        "Retrying once..."
+                    )
+
+                    sleep(2)
+
+                    continue
+
+            # ------------------------------------------------
+            # OTHER TEMPORARY ERRORS
+            # ------------------------------------------------
+
+            if attempt < max_attempts - 1:
+
+                wait_seconds = 2
 
                 print(
                     "Retrying question extraction "
@@ -703,6 +768,10 @@ def extract_questions_from_page(
                     wait_seconds
                 )
 
+                continue
+
+            raise
+
     if last_error:
         raise last_error
 
@@ -711,6 +780,10 @@ def extract_questions_from_page(
         f"for page {page_number}."
     )
 
+
+# ============================================================
+# EXTRACT QUESTIONS FROM FILE
+# ============================================================
 
 def extract_questions(
     file_bytes: bytes,
@@ -731,9 +804,9 @@ def extract_questions(
         Dict[str, Any]
     ] = []
 
-    # ---------------------------------------------------------
+    # ========================================================
     # PDF
-    # ---------------------------------------------------------
+    # ========================================================
 
     if content_type == "application/pdf":
 
@@ -742,6 +815,7 @@ def extract_questions(
         )
 
         if not pages:
+
             return {
                 "questions": []
             }
@@ -757,10 +831,12 @@ def extract_questions(
                 "page"
             ]
 
-            image_bytes = base64.b64decode(
-                page[
-                    "image"
-                ]
+            image_bytes = (
+                base64.b64decode(
+                    page[
+                        "image"
+                    ]
+                )
             )
 
             page_result = (
@@ -788,9 +864,9 @@ def extract_questions(
                 page_questions
             )
 
-    # ---------------------------------------------------------
-    # Single image
-    # ---------------------------------------------------------
+    # ========================================================
+    # SINGLE IMAGE
+    # ========================================================
 
     else:
 
@@ -812,49 +888,92 @@ def extract_questions(
             )
         )
 
-    # ---------------------------------------------------------
-    # Final ordering
-    # ---------------------------------------------------------
+    # ========================================================
+    # FINAL ORDERING
+    # ========================================================
 
-    # Preserve printed page order.
-    # We intentionally do NOT sort alphabetically by question
-    # number because questions may have complex subparts.
+    def question_sort_key(
+        item: Dict[str, Any],
+    ):
 
-    all_questions = sorted(
-        all_questions,
-        key=lambda item: (
-            int(
-                re.match(
-                    r"\d+",
-                    str(
-                        item.get(
-                            "number",
-                            "999999",
-                        )
-                    ),
-                ).group()
+        number = str(
+            item.get(
+                "number",
+                "",
             )
-            if re.match(
-                r"\d+",
-                str(
-                    item.get(
-                        "number",
-                        "",
-                    )
-                ),
-            )
-            else 999999,
+        )
 
+        match = re.match(
+            r"^\d+",
+            number,
+        )
+
+        if match:
+
+            numeric_number = int(
+                match.group()
+            )
+
+        else:
+
+            numeric_number = 999999
+
+        return (
             item.get(
                 "page",
                 999999,
             ),
-        ),
+            numeric_number,
+            number,
+        )
+
+    all_questions = sorted(
+        all_questions,
+        key=question_sort_key,
     )
 
-    # ---------------------------------------------------------
-    # Rebuild stable IDs
-    # ---------------------------------------------------------
+    # ========================================================
+    # REMOVE DUPLICATE QUESTIONS
+    # ========================================================
+
+    unique_questions = []
+
+    seen_numbers = set()
+
+    for question in all_questions:
+
+        key = (
+            question.get(
+                "page"
+            ),
+            question.get(
+                "number"
+            ),
+        )
+
+        if key in seen_numbers:
+
+            print(
+                "Duplicate question removed: "
+                f"page={key[0]}, "
+                f"number={key[1]}"
+            )
+
+            continue
+
+        seen_numbers.add(
+            key
+        )
+
+        unique_questions.append(
+            question
+        )
+
+    all_questions = unique_questions
+
+    # ========================================================
+    # REBUILD STABLE IDS
+    # ========================================================
 
     for index, question in enumerate(
         all_questions,
@@ -864,6 +983,10 @@ def extract_questions(
         question["id"] = (
             f"q{index}"
         )
+
+    # ========================================================
+    # FINAL LOG
+    # ========================================================
 
     print(
         "\n========== FINAL QUESTION EXTRACTION =========="
