@@ -21,11 +21,8 @@ client = Groq(
 )
 
 
-# One model for both text and vision
-MODEL_NAME = "qwen/qwen3.6-27b"
-
+# Centralized model configuration
 VISION_MODEL = "qwen/qwen3.6-27b"
-
 TEXT_MODEL = "qwen/qwen3.6-27b"
 
 
