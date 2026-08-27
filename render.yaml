@@ -1,8 +1,9 @@
-﻿services:
+services:
   # Backend FastAPI Web Service
   - type: web
     name: veda-ai-backend
     env: python
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -18,6 +19,7 @@
   - type: web
     name: veda-ai-frontend
     env: static
+    plan: free
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist
