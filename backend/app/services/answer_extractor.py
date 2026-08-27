@@ -252,6 +252,14 @@ def clean_json_text(text: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
 
+    if "<think>" in text.lower():
+        text = re.sub(
+            r"<think>[\s\S]*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+
     match = re.search(
         r"```(?:json)?\s*([\s\S]*?)\s*```",
         text,
@@ -595,7 +603,7 @@ def extract_answers_from_page(
                     }
                 ],
                 temperature=0,
-                max_tokens=3500,
+                max_tokens=8192,
             )
 
             raw = (

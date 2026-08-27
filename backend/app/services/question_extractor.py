@@ -141,13 +141,21 @@ def clean_json_text(
 
     text = text.strip()
 
-    # Remove <think> blocks.
+    # Remove <think> blocks (both closed and unclosed)
     text = re.sub(
         r"<think>[\s\S]*?</think>",
         "",
         text,
         flags=re.IGNORECASE,
     ).strip()
+
+    if "<think>" in text.lower():
+        text = re.sub(
+            r"<think>[\s\S]*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
 
     # Remove markdown code fences.
     text = re.sub(
@@ -706,7 +714,7 @@ def extract_questions_from_page(
                 }
             ],
             temperature=0,
-            max_tokens=2500,
+            max_tokens=8192,
         )
 
         raw = (
