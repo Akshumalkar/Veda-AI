@@ -708,6 +708,108 @@ def extract_answers_from_page(
 ):
     """
     Extract handwritten answers from ONE page.
+    """
+
+    page_prompt = (
+        ANSWER_PROMPT
+        + "\n\n"
+        + f"This is page {page_number} "
+        + "of the student's answer sheet.\n"
+        + f"Every region MUST use page={page_number}.\n"
+        + "Coordinates MUST be normalized from 0 to 1000.\n"
+        + "Return ONLY valid JSON."
+    )
+
+    message_content = [
+        {
+            "type": "text",
+            "text": page_prompt,
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_to_data_url(
+                    image_bytes,
+                    mime_type,
+                )
+            },
+        },
+    ]
+
+    print(
+        "\n========== ANSWER EXTRACTION "
+        f"PAGE {page_number} =========="
+    )
+
+    try:
+
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": message_content,
+                }
+            ],
+            temperature=0,
+            max_tokens=3500,
+            response_format={
+                "type": "json_object"
+            },
+        )
+
+        raw = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
+
+        print(
+            "\n========== GROQ ANSWER PAGE "
+            f"{page_number} =========="
+        )
+
+        print(raw)
+
+        print(
+            "========================================\n"
+        )
+
+        raw = clean_json_text(raw)
+
+        if not raw:
+            raise ValueError(
+                "Groq returned an empty response."
+            )
+
+        result = json.loads(raw)
+
+        return sanitize_result(result)
+
+    except Exception as error:
+
+        error_message = str(error)
+
+        print(
+            f"Answer extraction page "
+            f"{page_number} failed: "
+            f"{error_message}"
+        )
+
+        if (
+            "429" in error_message
+            or "rate_limit" in error_message.lower()
+            or "rate limit" in error_message.lower()
+        ):
+            print(
+                "Groq rate limit reached. "
+                "Stopping immediately."
+            )
+
+        raise
+    """
+    Extract handwritten answers from ONE page.
 
     IMPORTANT:
     This function stops immediately on Groq rate limits.
